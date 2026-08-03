@@ -1,0 +1,38 @@
+# SolVend refund — the only path by which value leaves the shop.
+#
+# Custody stays T1 throughout. The agent never signs. On approval it emits a
+# Solana Pay URI addressed to the original payer, which the OPERATOR scans with
+# their own wallet. If this SOP were fully compromised, the worst outcome is
+# that the operator is shown a payment request they can decline.
+#
+# Triggered by the agent calling sop_execute during a customer conversation
+# (there is no `zeroclaw sop execute` CLI — manual runs originate inside an
+# agent turn). The agent decides to *ask*; it never decides to *pay*.
+
+[sop]
+name = "refund-request"
+description = "Escalate a refund to the human operator and emit an unsigned refund payment request on approval."
+version = "1.0.0"
+
+max_concurrent = 4              # several customers may be waiting at once
+admission_policy = "parallel"
+max_pending_approvals = 8       # bound the queue; an attacker spamming refund
+                                # requests cannot exhaust operator attention
+
+[[triggers]]
+type = "manual"                 # no match fields on a manual trigger
+
+[sop.approval.groups.shop_operator]
+members = ["http:OPERATOR_SUBJECT_ID"]           # [?] confirm subject format
+
+[sop.approval.policies.refund]
+required_group = "shop_operator"
+quorum = 1
+request_route = "telegram.operator:OPERATOR_CHAT_ID"
+
+# NOTE — trap #1 (blockhash expiry) does not apply to this SOP, and say so in
+# the write-up. We hold no pre-built transaction across the approval wait; we
+# hold a Solana Pay URI, which is a plain string with no blockhash and no TTL.
+# An operator can approve after lunch and the artifact is still valid. This is
+# the structural advantage of staying at T1 — no durable nonce account, no
+# 0.0015 SOL rent, no one-nonce-per-pending-approval serialization.

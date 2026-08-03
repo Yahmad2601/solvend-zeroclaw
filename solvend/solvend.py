@@ -263,6 +263,116 @@ def cmd_claim(otp: str) -> dict:
     return {"dispense": False, "reason": "invalid, expired, or already claimed"}
 
 
+# --------------------------------------------------------------------------
+# Refunds — T1. The agent builds an unsigned payment request; the operator's
+# own wallet signs it. Nothing here can move funds.
+# --------------------------------------------------------------------------
+_B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def b58encode(raw: bytes) -> str:
+    n = int.from_bytes(raw, "big")
+    out = ""
+    while n:
+        n, rem = divmod(n, 58)
+        out = _B58[rem] + out
+    return "1" * (len(raw) - len(raw.lstrip(b"\x00"))) + out
+
+
+# Only these states may ever be refunded. CLAIMED means the drink was dispensed.
+# AWAITING_PAYMENT means nothing was ever paid — refunding it mints free money.
+REFUNDABLE = ("PAID_EXPIRED", "PAID_UNCLAIMED")
+
+
+def resolve_payer(signature: str, _transport=None):
+    """Refund destination, read from the chain — never from a chat message.
+
+    This is the single most important control in the refund path. Every refund
+    attack is an attempt to get an attacker-supplied address into this slot, so
+    the address is derived from the settling transaction we already validated:
+    the account whose USDC balance went DOWN by at least the invoice amount.
+    A chat message cannot influence the result. If the transaction is ambiguous
+    (several payers), we return None and the operator must resolve by hand.
+    """
+    tx = rpc("getTransaction",
+             [signature, {"encoding": "jsonParsed",
+                          "maxSupportedTransactionVersion": 0,
+                          "commitment": "finalized"}],
+             _transport).get("result")
+    if not tx:
+        return None
+    meta = tx.get("meta") or {}
+
+    def bal(entries):
+        out = {}
+        for e in entries or []:
+            if e.get("mint") == USDC_MINT and e.get("owner"):
+                out[e["owner"]] = int(e["uiTokenAmount"]["amount"])
+        return out
+
+    pre, post = bal(meta.get("preTokenBalances")), bal(meta.get("postTokenBalances"))
+    senders = [o for o in set(pre) | set(post)
+               if o != MERCHANT and post.get(o, 0) - pre.get(o, 0) < 0]
+    return senders[0] if len(senders) == 1 else None
+
+
+def cmd_refund_request(invoice_id: str, reason: str = "", _transport=None) -> dict:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT invoice_id, item, amount_base, status, signature FROM invoices"
+            " WHERE invoice_id=?", (invoice_id,)).fetchone()
+        if not row:
+            return {"error": "no such invoice"}
+        if row["status"] not in REFUNDABLE:
+            return {"error": f"not refundable from status {row['status']}"}
+        if not row["signature"]:
+            return {"error": "invoice has no settled payment"}
+
+        payer = resolve_payer(row["signature"], _transport)
+        if not payer:
+            return {"error": "could not resolve a unique payer on-chain; operator must resolve manually"}
+
+        conn.execute("UPDATE invoices SET status='EXPIRED_REFUND_REQUESTED'"
+                     " WHERE invoice_id=? AND status IN (?,?)",
+                     (invoice_id, *REFUNDABLE))
+    return {"invoice_id": invoice_id, "item": row["item"],
+            "amount": f"{row['amount_base'] / 10 ** USDC_DECIMALS:.2f}",
+            "payer": payer, "signature": row["signature"], "reason": reason[:120],
+            "status": "EXPIRED_REFUND_REQUESTED"}
+
+
+def cmd_refund_approve(invoice_id: str, _transport=None) -> dict:
+    """Called ONLY after the SOP checkpoint clears. Emits a Solana Pay URI the
+    operator scans with their own wallet. We never hold a key."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT item, amount_base, signature FROM invoices"
+            " WHERE invoice_id=? AND status='EXPIRED_REFUND_REQUESTED'",
+            (invoice_id,)).fetchone()
+        if not row:
+            return {"error": "invoice is not awaiting refund approval"}
+        payer = resolve_payer(row["signature"], _transport)
+        if not payer:
+            return {"error": "payer no longer resolvable; aborting"}
+        conn.execute("UPDATE invoices SET status='REFUND_APPROVED' WHERE invoice_id=?"
+                     " AND status='EXPIRED_REFUND_REQUESTED'", (invoice_id,))
+
+    amt = f"{row['amount_base'] / 10 ** USDC_DECIMALS:.6f}".rstrip("0").rstrip(".")
+    uri = (f"solana:{payer}?amount={amt}&spl-token={USDC_MINT}"
+           f"&reference={b58encode(os.urandom(32))}"
+           f"&label=SolVend%20refund&message=Refund%20{invoice_id}")
+    return {"invoice_id": invoice_id, "payer": payer, "amount": amt, "refund_uri": uri}
+
+
+def cmd_refund_deny(invoice_id: str) -> dict:
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE invoices SET status='REFUND_DENIED' WHERE invoice_id=?"
+            " AND status='EXPIRED_REFUND_REQUESTED' RETURNING invoice_id", (invoice_id,))
+        return {"invoice_id": invoice_id,
+                "status": "REFUND_DENIED" if cur.fetchone() else "no-op"}
+
+
 def main() -> int:
     args = sys.argv[1:]
     if not args:
@@ -280,6 +390,12 @@ def main() -> int:
         print(json.dumps(cmd_watch()))
     elif cmd == "claim":
         print(json.dumps(cmd_claim(args[1])))
+    elif cmd == "refund-request":
+        print(json.dumps(cmd_refund_request(args[1], args[2] if len(args) > 2 else "")))
+    elif cmd == "refund-approve":
+        print(json.dumps(cmd_refund_approve(args[1])))
+    elif cmd == "refund-deny":
+        print(json.dumps(cmd_refund_deny(args[1])))
     else:
         print(json.dumps({"error": f"unknown command {cmd!r}"}))
         return 2

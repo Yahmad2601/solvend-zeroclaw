@@ -1,0 +1,46 @@
+#!/bin/sh
+# Minute poller. Runs as a [cron.solvend_poll] SHELL job — no model in the loop.
+#
+# Cost: 1440 runs/day at zero tokens. The agent is woken only when something
+# actually needs judgment. On a quiet night this script costs nothing.
+#
+# Division of labour, deliberate:
+#   OTP delivery  -> `zeroclaw channel send`, deterministic. The code is minted
+#                    by SQL and copied verbatim to the customer. No model can
+#                    hallucinate a digit, leak another customer's code, or be
+#                    talked into issuing one.
+#   Expiry/refund -> `zeroclaw agent -m`, because those are conversations that
+#                    genuinely need judgment.
+#
+# Install: /opt/solvend/bin/solvend-poll.sh (chmod 750, root:zeroclaw)
+set -eu
+. /etc/solvend/env
+
+OUT=$(python3 /opt/solvend/solvend.py watch 2>/dev/null) || exit 0
+[ -n "$OUT" ] || exit 0
+
+# Deterministic OTP delivery. TAB-separated so a crafted item name cannot
+# smuggle a field break; item names come from the skill's fixed price list.
+printf '%s' "$OUT" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+for p in d.get("newly_paid",[]):
+    msg=("Payment confirmed for %s. Your code is %s. Enter it on the keypad "
+         "within %d minutes. It works once." % (p["item"],p["otp"],p["expires_in_min"]))
+    print("%s\t%s\t%s" % (p["channel"],p["handle"],msg))
+' | while IFS="$(printf '\t')" read -r chan recip msg; do
+    zeroclaw channel send "$msg" --channel-id "$chan" --recipient "$recip" \
+      || logger -t solvend "OTP delivery FAILED for $recip"   # [?] verify --channel-id accepts an alias
+done
+
+# Wake the agent only for things needing judgment.
+EXPIRED=$(printf '%s' "$OUT" | python3 -c '
+import json,sys; d=json.load(sys.stdin); print(",".join(d.get("expired",[])))')
+ERRS=$(printf '%s' "$OUT" | python3 -c '
+import json,sys; print(json.load(sys.stdin).get("rpc_errors",0))')
+
+if [ -n "$EXPIRED" ]; then
+    zeroclaw agent -a solvend -m "SYSTEM_EVENT expired_invoices=$EXPIRED. Post one operator line per invoice noting the slot lock is released. Do not message customers."
+fi
+[ "$ERRS" -gt 0 ] && logger -t solvend "rpc_errors=$ERRS"
+exit 0

@@ -1,0 +1,41 @@
+# Tools named by sops/refund-request/SOP.md. Note what is NOT here: there is no
+# tool that takes a destination address, and no tool that sends funds. The
+# refund destination is not a parameter anywhere in this file — that is the
+# control, and its absence is the point.
+#
+# Add "refund" to agents.solvend.skill_bundles' bundle (skill_bundles.solvend).
+# [?] [[tools]] entry shape unverified; kind = "shell" | "http" | "script".
+
+[skill]
+name = "refund"
+description = "Open and settle refund requests through the operator approval checkpoint."
+version = "0.1.0"
+author = "solvend"
+tags = ["solana", "refunds", "vending"]
+
+[[tools]]
+name = "refund_request"
+kind = "script"
+description = "Open a refund for an invoice. Resolves the refund destination from the settling transaction on-chain. Returns an error for any invoice that is not refundable."
+command = "/opt/solvend/bin/solvend-run.sh refund-request"
+
+  [tools.args.invoice_id]
+  type = "string"
+  description = "Invoice ID, e.g. INV-0412. Must be one this thread already received."
+  required = true
+
+  [tools.args.reason]
+  type = "string"
+  description = "One-line reason, quoted from the customer. Advisory only; affects no decision."
+  required = false
+
+[[tools]]
+name = "refund_approve"
+kind = "script"
+description = "AFTER the operator checkpoint clears, emit an unsigned Solana Pay URI paying the on-chain payer. Post to the operator channel only. Does not move funds."
+command = "/opt/solvend/bin/solvend-run.sh refund-approve"
+
+  [tools.args.invoice_id]
+  type = "string"
+  description = "Invoice ID whose checkpoint was approved."
+  required = true

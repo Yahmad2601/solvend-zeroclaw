@@ -84,7 +84,7 @@ max_iterations = 8                                     # [?] caps a runaway tool
 # SKILLS
 # ---------------------------------------------------------------------------
 [skill_bundles.solvend]                                # [V] skill_bundles.<alias>
-skills = ["solana-pay-invoice", "dispense-otp"]        # [?] confirm key name (skills vs members)
+skills = ["solana-pay-invoice", "dispense-otp", "refund"]   # [?] confirm key name (skills vs members)
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +118,31 @@ sops_dir = "/var/lib/zeroclaw/agents/solvend/workspace/sops"   # [?] confirm key
 [scheduler]                                            # [V]
 maintenance_interval_secs = 60                         # [V] default 60; cron SOPs are polled by this tick,
                                                        # so 60s is your true floor on payment-detection latency
+
+# ---------------------------------------------------------------------------
+# MINUTE POLLER — shell cron job, NOT an SOP, NOT an agentic run.
+# The payment-watcher SOP is retained for manual/observability runs, but this
+# is what actually polls: 1440 executions/day at zero tokens. The model is
+# invoked only when solvend-poll.sh decides there is something to decide.
+# ---------------------------------------------------------------------------
+[cron.solvend_poll]                                    # [V] cron.<alias>, shell or agentic
+enabled = true
+schedule = "* * * * *"                                 # [?] confirm key name (schedule vs expression)
+kind = "shell"                                         # [?] confirm discriminator
+command = "/opt/solvend/bin/solvend-poll.sh"
+timeout_secs = 45                                      # must stay under the 60s tick
+
+# ---------------------------------------------------------------------------
+# REFUND APPROVALS — gateway subjects, not chat handles.
+# ---------------------------------------------------------------------------
+[sop.approval.groups.shop_operator]                    # [V] structure from sop/syntax.md
+members = ["http:OPERATOR_SUBJECT_ID"]                 # [?] confirm a telegram: scheme exists;
+                                                       # if not, approve via `zeroclaw sop approve`
+
+[sop.approval.policies.refund]                         # [V]
+required_group = "shop_operator"
+quorum = 1
+request_route = "telegram.operator:OPERATOR_CHAT_ID"   # [V] request_route format from docs
 
 [security]
 encrypt = true                                         # [?] confirm exact path (secrets.encrypt vs security.encrypt)
