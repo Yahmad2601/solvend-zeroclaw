@@ -1,0 +1,7 @@
+#!/bin/sh
+# Env wrapper for the invoice skill tool (script tools do not inherit host env).
+# Install: /opt/solvend/bin/solvend-run.sh-invoice (chmod 750, root:zeroclaw)
+# Usage:   solvend-run.sh-invoice <item> <channel> <handle>
+set -eu
+. /etc/solvend/env
+exec python3 /opt/solvend/skills/solana-pay-invoice/scripts/new_invoice.py "$@"

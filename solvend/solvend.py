@@ -30,6 +30,19 @@ from secrets import randbelow
 
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 USDC_DECIMALS = 6
+
+# Single source of truth for the catalogue. Price is NOT a parameter anywhere in
+# this file — same control as the refund destination. A model injected into
+# invoicing a cola at 0.01 cannot: cmd_invoice looks the price up here and an
+# unknown item is rejected outright. Keep the display prices in
+# skills/solana-pay-invoice/SKILL.md in sync with these; this table is what
+# actually charges, the skill text only tells the model what to say.
+# `slot` is the physical gantry position the ESP32 understands.
+ITEMS = {
+    "water":  {"price_base": 1_000_000, "slot": "drink-1"},
+    "cola":   {"price_base": 1_500_000, "slot": "drink-2"},
+    "energy": {"price_base": 2_500_000, "slot": "drink-3"},
+}
 OTP_TTL_SECS = 15 * 60
 MAX_OTP_ATTEMPTS = 5          # per invoice, then the OTP is dead
 RPC_TIMEOUT_SECS = 10
@@ -162,23 +175,36 @@ def mint_otp(conn) -> str:
     raise RuntimeError("OTP space exhausted — too many unclaimed invoices")
 
 
-def cmd_invoice(item: str, amount_disp: str, channel: str, handle: str, reference: str,
+def cmd_invoice(item: str, channel: str, handle: str, reference: str,
                 invoice_id: str = None) -> dict:
-    amount_base = int(Decimal(amount_disp) * (10 ** USDC_DECIMALS))
-    if amount_base <= 0:
-        return {"error": "amount must be positive"}
+    """Price comes from ITEMS, never from the caller. There is no amount
+    parameter, so no message can set one."""
+    spec = ITEMS.get(item.strip().lower())
+    if not spec:
+        return {"error": f"unknown item {item!r}; stocked: {', '.join(ITEMS)}"}
+    item = item.strip().lower()
+    amount_base = spec["price_base"]
     with db() as conn:
         if invoice_id is None:
             # Atomic allocation: UPDATE...RETURNING is a single write txn, so two
-            # concurrent invoices can never receive the same ID.
-            n = conn.execute("UPDATE seq SET n = n + 1 RETURNING n").fetchone()["n"]
-            invoice_id = f"INV-{n:04d}"
+            # concurrent invoices can never receive the same ID. Skip any ID that
+            # already exists — the counter shares a namespace with IDs inserted
+            # by hand (migrations, operator repairs), so it can start behind.
+            for _ in range(50):
+                n = conn.execute("UPDATE seq SET n = n + 1 RETURNING n").fetchone()["n"]
+                invoice_id = f"INV-{n:04d}"
+                if not conn.execute("SELECT 1 FROM invoices WHERE invoice_id=?",
+                                    (invoice_id,)).fetchone():
+                    break
+            else:
+                return {"error": "could not allocate an invoice id"}
         conn.execute(
             "INSERT INTO invoices (invoice_id, reference, item, amount_base, channel,"
             " handle, status, created_at) VALUES (?,?,?,?,?,?, 'AWAITING_PAYMENT', ?)",
             (invoice_id, reference, item, amount_base, channel, handle, now()),
         )
-    return {"invoice_id": invoice_id, "status": "AWAITING_PAYMENT"}
+    return {"invoice_id": invoice_id, "status": "AWAITING_PAYMENT",
+            "amount": f"{amount_base / 10 ** USDC_DECIMALS:.6f}".rstrip("0").rstrip(".")}
 
 
 def cmd_watch(_transport=None) -> dict:
@@ -254,7 +280,14 @@ def cmd_claim(otp: str) -> dict:
         )
         row = cur.fetchone()
         if row:
-            return {"dispense": True, "invoice_id": row["invoice_id"], "item": row["item"]}
+            slot = ITEMS.get(row["item"], {}).get("slot")
+            if not slot:
+                # Item was de-stocked after purchase. The OTP is already burned,
+                # so this is an operator problem, not a retry: fail loud.
+                return {"dispense": False, "reason": "no slot mapped for item",
+                        "invoice_id": row["invoice_id"], "item": row["item"]}
+            return {"dispense": True, "invoice_id": row["invoice_id"],
+                    "item": row["item"], "slot": slot}
         # Wrong code: charge an attempt against every live invoice so a scanner
         # cannot walk the 10,000-code space for free.
         conn.execute(

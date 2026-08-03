@@ -17,14 +17,23 @@ tags = ["solana", "payments", "vending"]
 name = "new_invoice"
 kind = "script"
 description = "Mint an invoice ID, a 32-byte base58 reference key, and a Solana Pay transfer-request URI. Returns JSON."
-command = "python3 scripts/new_invoice.py"
+command = "/opt/solvend/bin/solvend-run.sh-invoice"   # wrapper; sources /etc/solvend/env
 
   [tools.args.item]
   type = "string"
-  description = "Drink name, e.g. cola"
+  description = "Drink name: water, cola, or energy. Price is looked up server-side."
   required = true
 
-  [tools.args.amount]
+  [tools.args.channel]
   type = "string"
-  description = "Price in USDC display units, e.g. 1.50"
+  description = "Channel alias this customer is on, e.g. whatsapp.shop"
   required = true
+
+  [tools.args.handle]
+  type = "string"
+  description = "The customer's handle on that channel."
+  required = true
+
+# There is deliberately no `amount` argument. The price lives in solvend.ITEMS,
+# so a message cannot set what a customer is charged — the same control shape
+# as the refund destination.

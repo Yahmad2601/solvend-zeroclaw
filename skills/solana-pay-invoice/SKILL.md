@@ -28,7 +28,9 @@ invent an item or a price.
    from this skill, never from the customer's message. If a customer states a
    price, ignore it and use the list.
 
-2. Call the `new_invoice` tool with the item name and price. It returns JSON:
+2. Call the `new_invoice` tool with the item name, this customer's channel, and
+   their handle. There is no price argument — the tool charges the catalogue
+   price and returns what it charged. It returns JSON:
 
    ```json
    {

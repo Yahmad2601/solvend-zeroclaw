@@ -36,28 +36,21 @@ def b58encode(raw: bytes) -> str:
 
 
 def main() -> int:
-    if len(sys.argv) != 5:
-        print(json.dumps({"error": "usage: new_invoice.py <item> <amount> <channel> <handle>"}))
+    if len(sys.argv) != 4:
+        print(json.dumps({"error": "usage: new_invoice.py <item> <channel> <handle>"}))
         return 2
 
-    item, amount_raw, channel, handle = sys.argv[1:5]
-    try:
-        amount = round(float(amount_raw), 6)
-    except ValueError:
-        print(json.dumps({"error": f"amount not numeric: {amount_raw!r}"}))
-        return 2
-    if amount <= 0:
-        print(json.dumps({"error": "amount must be positive"}))
-        return 2
+    # No amount parameter, by design. The price is looked up from solvend.ITEMS,
+    # so no message — however it is phrased, whoever it claims to be from —
+    # can set what a customer is charged.
+    item, channel, handle = sys.argv[1:4]
 
     reference = b58encode(os.urandom(32))
-    amt = f"{amount:.6f}".rstrip("0").rstrip(".")   # 1.5, not 1.500000
-
-    rec = solvend.cmd_invoice(item, amt, channel, handle, reference)
+    rec = solvend.cmd_invoice(item, channel, handle, reference)
     if "error" in rec:
         print(json.dumps(rec))
         return 2
-    invoice_id = rec["invoice_id"]
+    invoice_id, amt = rec["invoice_id"], rec["amount"]
 
     uri = (
         f"solana:{RECIPIENT}"

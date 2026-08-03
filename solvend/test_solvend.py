@@ -44,11 +44,11 @@ def transport_for(tx_obj, sig="SIG1"):
     return _t
 
 
-def fresh(ref="REF1", amount="1.50", item="cola"):
+def fresh(ref="REF1", item="cola"):
     with solvend.db() as c:
         c.executescript(solvend.SCHEMA)
         c.execute("DELETE FROM invoices")
-    return solvend.cmd_invoice(item, amount, "whatsapp.shop", "+5511999", ref, "INV-0001")
+    return solvend.cmd_invoice(item, "whatsapp.shop", "+5511999", ref, "INV-0001")
 
 
 print("\nvalidate_transfer — the anti-spoof boundary")
@@ -184,6 +184,37 @@ solvend.cmd_refund_request("INV-0001", "", t)
 solvend.cmd_refund_deny("INV-0001")
 check("approve after deny refused",
       "error" in solvend.cmd_refund_approve("INV-0001", t))
+
+print("\ncatalogue — price is not a parameter")
+check("cmd_invoice has no amount parameter",
+      "amount_disp" not in solvend.cmd_invoice.__code__.co_varnames
+      and "amount" not in solvend.cmd_invoice.__code__.co_varnames)
+r = fresh(item="cola")
+check("cola priced from ITEMS, not caller", r["amount"] == "1.5")
+with solvend.db() as c:
+    check("ledger stores 1_500_000 base units",
+          c.execute("SELECT amount_base FROM invoices").fetchone()[0] == 1_500_000)
+check("unknown item refused",
+      "error" in solvend.cmd_invoice("beer", "whatsapp.shop", "+55", "REFX", "INV-9001"))
+check("item casing normalised",
+      "error" not in solvend.cmd_invoice(" CoLa ", "whatsapp.shop", "+55", "REFY", "INV-9002"))
+check("auto-allocated IDs never collide",
+      len({solvend.cmd_invoice("water", "c", "h", f"REFZ{i}")["invoice_id"]
+           for i in range(25)}) == 25)
+
+print("\nkeypad — slot resolution for the serial daemon")
+fresh(item="energy")
+t = transport_for(tx2(merchant_post=2_500_000))
+r = solvend.cmd_watch(t)
+check("energy settles at its own price", len(r["newly_paid"]) == 1)
+claim = solvend.cmd_claim(r["newly_paid"][0]["otp"])
+check("claim returns the gantry slot", claim.get("slot") == "drink-3")
+check("denied claim carries no slot", "slot" not in solvend.cmd_claim("0000"))
+
+fresh(item="cola")
+t = transport_for(tx2(merchant_post=1_000_000))     # paid water price for a cola
+r = solvend.cmd_watch(t)
+check("underpaying a pricier item does not settle", r["newly_paid"] == [])
 
 print("\nrefund — ambiguity fails closed")
 amb = {"meta": {"err": None, "preTokenBalances": [

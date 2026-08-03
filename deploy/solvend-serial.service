@@ -1,0 +1,27 @@
+[Unit]
+Description=SolVend keypad serial bridge (ESP32 <-> ledger)
+After=multi-user.target
+
+[Service]
+Type=simple
+User=zeroclaw
+Group=dialout
+# dialout is what grants /dev/ttyUSB0; the zeroclaw user needs it:
+#   sudo usermod -aG dialout zeroclaw
+EnvironmentFile=/etc/solvend/env
+ExecStart=/usr/bin/python3 /opt/solvend/solvend-serial.py
+Restart=always
+RestartSec=3
+
+# The daemon reads four digits and writes one command. Give it nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/solvend
+PrivateNetwork=true          # it never touches the network — enforce that
+DevicePolicy=closed
+DeviceAllow=/dev/ttyUSB0 rw
+
+[Install]
+WantedBy=multi-user.target
