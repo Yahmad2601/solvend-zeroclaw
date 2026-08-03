@@ -1,0 +1,30 @@
+# Typed tool definition for the solana-pay-invoice skill.
+#
+# [?] The [skill] table and its name/description/version/author/tags fields are
+# verified. The [[tools]] entry shape below is NOT — docs confirm only that
+# entries take kind = "shell" | "http" | "script". Verify field names against a
+# shipped example before relying on this, and check whether SKILL.md and
+# SKILL.toml may coexist in one skill directory or whether TOML wins outright.
+
+[skill]
+name = "solana-pay-invoice"
+description = "Issue a Solana Pay USDC invoice with a unique reference key."
+version = "0.1.0"
+author = "solvend"
+tags = ["solana", "payments", "vending"]
+
+[[tools]]
+name = "new_invoice"
+kind = "script"
+description = "Mint an invoice ID, a 32-byte base58 reference key, and a Solana Pay transfer-request URI. Returns JSON."
+command = "python3 scripts/new_invoice.py"
+
+  [tools.args.item]
+  type = "string"
+  description = "Drink name, e.g. cola"
+  required = true
+
+  [tools.args.amount]
+  type = "string"
+  description = "Price in USDC display units, e.g. 1.50"
+  required = true

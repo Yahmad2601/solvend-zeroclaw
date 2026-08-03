@@ -1,0 +1,31 @@
+# SolVend payment watcher — cron-polled settlement.
+#
+# Read-only with respect to funds. No approval checkpoint here by design: this
+# SOP cannot move money, only observe finalized transfers and hand out OTPs.
+# The refund path is a separate SOP and that one IS checkpointed.
+
+[sop]
+name = "payment-watcher"
+description = "Poll open invoice references, settle validated USDC payments, sweep expired OTPs."
+version = "1.0.0"
+
+# One poller. Concurrent runs would waste RPC budget racing each other; the
+# UPDATE ... WHERE status='AWAITING_PAYMENT' guard makes a double-settle
+# impossible even if two ran, but paying twice for the same RPC call is silly.
+max_concurrent = 1
+admission_policy = "hold"        # serialize; never fan out pollers
+max_pending_approvals = 0
+
+# [?] DISCREPANCY TO RESOLVE ON YOUR BUILD — the two docs pages disagree:
+#   sop/syntax.md          shows the array form:  [[triggers]] / type = "manual"
+#   sop/fan-in/cron.html   shows the table form:  [trigger]    / type = "cron"
+# Array form is used here. If the SOP fails to register, swap to [trigger].
+# Verify before day 4, not on day 5.
+[[triggers]]
+type = "cron"
+expression = "* * * * *"         # every minute
+
+# Effective floor is scheduler.maintenance_interval_secs (60s) — cron SOPs are
+# dispatched by the maintenance tick, "a poller rather than a per-schedule
+# timer". Requesting faster than 60s buys nothing. State this in the write-up:
+# worst-case customer wait is ~60s poll + ~13s finalization.

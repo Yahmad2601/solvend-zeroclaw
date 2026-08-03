@@ -1,0 +1,19 @@
+# Exposes the deterministic settlement pass as a tool the payment-watcher SOP
+# can name in `tools:`. The skill carries no instructions about *deciding*
+# payment — that decision lives in solvend.py and is unreachable from chat.
+#
+# [?] Same caveat as solana-pay-invoice/SKILL.toml: [[tools]] entry shape is
+# not verified. Docs confirm only kind = "shell" | "http" | "script".
+
+[skill]
+name = "dispense-otp"
+description = "Settle validated USDC payments and sweep expired dispense codes."
+version = "0.1.0"
+author = "solvend"
+tags = ["solana", "payments", "vending"]
+
+[[tools]]
+name = "check_payments"
+kind = "script"
+description = "Run one settlement pass. Returns {newly_paid, expired, pending, rpc_errors}. Takes no arguments and is safe to call repeatedly."
+command = "python3 /opt/solvend/solvend.py watch"

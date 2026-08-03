@@ -1,0 +1,123 @@
+# SolVend — ZeroClaw config
+# Target: ~/.zeroclaw/config.toml on the Raspberry Pi 4
+#
+# Custody tier: T1 (BUILD). The agent holds NO private key. It constructs
+# Solana Pay transfer-request URIs and reads getSignaturesForAddress.
+# The customer's own wallet signs. Nothing here can move funds.
+#
+# Key legend:
+#   [V] key name verified against docs.zeroclawlabs.ai/master/en/reference/config.html
+#   [?] shape plausible but NOT verified — confirm with `zeroclaw config get <path>`
+
+# ---------------------------------------------------------------------------
+# MODEL PROVIDER
+# A Pi 4 (4GB) cannot run a local model with reliable tool-calling. Use hosted.
+# ---------------------------------------------------------------------------
+[providers.models.anthropic.main]                      # [V] providers.models.<type>.<alias>
+model = "claude-sonnet-5"
+api_key = "sk-ant-REDACTED"                            # encrypted at rest when secrets.encrypt = true
+
+[providers.models.anthropic.cheap]
+model = "claude-haiku-4-5-20251001"                    # used by the payment-poll SOP: runs every minute, keep it cheap
+
+
+# ---------------------------------------------------------------------------
+# CHANNEL — WhatsApp in WEB mode
+# Web mode is an outbound client: no public URL, no tunnel, no Meta app review.
+# Cloud API mode (phone_number_id/access_token/verify_token/app_secret) needs
+# Meta to reach https://<public>/whatsapp/<alias> — avoid it on a home Pi.
+# ---------------------------------------------------------------------------
+[channels.whatsapp.shop]                               # [V] channels.whatsapp.<alias>
+enabled = true
+session_path = "/var/lib/zeroclaw/wa.db"               # [V] presence of this key selects web mode
+mode = "personal"                                      # [V] "personal" | "business"
+dm_policy = "all"                                      # [V] allowlist | ignore | all — customers DM the vending machine
+group_policy = "ignore"                                # [V] no group traffic
+self_chat_mode = false                                 # [V]
+interrupt_on_new_message = false                       # [V] never abandon a half-finished invoice
+
+# Operator channel. Telegram long-polls, so it also needs no ingress.
+# Approvals and refund checkpoints route here, NOT to the customer channel.
+[channels.telegram.operator]                           # [V] channels.telegram.<alias>
+enabled = true
+bot_token = "REDACTED"                                 # [V]
+
+
+# ---------------------------------------------------------------------------
+# HTTP TOOL — the entire Solana surface at T1
+# allowed_domains is your real security boundary. Keep it to two hosts.
+# ---------------------------------------------------------------------------
+[http_request]                                         # [V]
+enabled = true                                         # [V]
+allowed_domains = [                                    # [V] default is ["*"] — do NOT leave it open
+  "mainnet.helius-rpc.com",
+  "api.mainnet-beta.solana.com",                       # fallback if Helius rate-limits
+]
+allow_private_hosts = false                            # [V] SSRF guard stays on
+timeout_secs = 15                                      # [V] default 30
+max_response_size = 262144                             # [V] 256 KiB. Trap #3: a fat RPC reply nukes your context.
+
+# RPC key handling. Bounty rule: keys live in config, never in code, never in a
+# skill body (skill text is model-visible and lands in the transcript).
+[http_request.secrets.helius]                          # [?] verify the injection placeholder syntax
+value = "REDACTED-HELIUS-KEY"
+
+
+# ---------------------------------------------------------------------------
+# RISK PROFILE — fail-closed
+# ---------------------------------------------------------------------------
+[risk_profiles.vending]                                # [V] risk_profiles.<alias>
+allowed_commands = []                                  # [V] no shell for the chat-facing agent
+excluded_tools = ["browser", "file_download"]          # [V] strips tools from every non-CLI channel
+forbidden_paths = ["~/.zeroclaw/config.toml", "/var/lib/zeroclaw"]   # [V]
+
+[risk_profiles.vending.approval_route]                 # [V]
+approver_channel = "telegram.operator"                 # [V] approvals leave the customer's reach
+timeout_secs = 300                                     # [V] default 120
+on_no_approver = "deny"                                # [V] fail closed — this is the line judges look for
+
+[runtime_profiles.vending]                             # [V] runtime_profiles.<alias>
+max_iterations = 8                                     # [?] caps a runaway tool loop
+
+
+# ---------------------------------------------------------------------------
+# SKILLS
+# ---------------------------------------------------------------------------
+[skill_bundles.solvend]                                # [V] skill_bundles.<alias>
+skills = ["solana-pay-invoice", "dispense-otp"]        # [?] confirm key name (skills vs members)
+
+
+# ---------------------------------------------------------------------------
+# AGENT
+# ---------------------------------------------------------------------------
+[agents.solvend]                                       # [V] agents.<alias>
+enabled = true                                         # [V]
+channels = ["whatsapp.shop", "telegram.operator"]      # [V]
+model_provider = "providers.models.anthropic.main"     # [V] dotted reference
+risk_profile = "vending"                               # [V]
+runtime_profile = "vending"                            # [V]
+skill_bundles = ["solvend"]                            # [V]
+
+[agents.solvend.memory]                                # [V] per-agent memory backend
+enabled = true                                         # operator preferences and conversation continuity ONLY.
+                                                       # The invoice ledger is NOT here — see note below.
+
+# Where the SOP engine finds payment-watcher/
+sops_dir = "/var/lib/zeroclaw/agents/solvend/workspace/sops"   # [?] confirm key name; default is <workspace>/sops
+
+# LEDGER LOCATION — deliberate. Invoice state lives in /var/lib/solvend/solvend.db,
+# owned by solvend.py, NOT in agent memory. Agent memory is written and read
+# through the model, which makes it non-atomic and injectable; "mark this invoice
+# paid" is a sentence someone can put in a WhatsApp message. Money state belongs
+# behind a UPDATE...WHERE the model cannot reach.
+
+
+# ---------------------------------------------------------------------------
+# SOP ENGINE — cron dispatch requires the maintenance tick
+# ---------------------------------------------------------------------------
+[scheduler]                                            # [V]
+maintenance_interval_secs = 60                         # [V] default 60; cron SOPs are polled by this tick,
+                                                       # so 60s is your true floor on payment-detection latency
+
+[security]
+encrypt = true                                         # [?] confirm exact path (secrets.encrypt vs security.encrypt)
