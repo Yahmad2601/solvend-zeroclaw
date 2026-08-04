@@ -28,7 +28,12 @@ import urllib.request
 from decimal import Decimal
 from secrets import randbelow
 
-USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+# Mainnet USDC by default. Override for devnet rehearsals:
+#   SOLVEND_USDC_MINT=4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU   (devnet USDC)
+# Test the whole loop on devnet with faucet money, then change two lines in
+# /etc/solvend/env to go live. Nothing else in the system knows the difference.
+USDC_MINT = os.environ.get("SOLVEND_USDC_MINT",
+                           "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
 USDC_DECIMALS = 6
 
 # Single source of truth for the catalogue. Price is NOT a parameter anywhere in

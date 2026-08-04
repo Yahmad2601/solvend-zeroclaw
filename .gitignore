@@ -1,0 +1,26 @@
+# Secrets — never commit. The real values live in /etc/solvend/env on the Pi
+# (chmod 600) and in ~/.zeroclaw/config.toml, neither of which belongs in git.
+env
+.env
+*.env
+config/config.local.toml
+secrets*
+
+# Ledger + local state. Contains customer handles and live OTPs.
+*.db
+*.db-wal
+*.db-shm
+invoice.seq
+
+# Local test artifacts
+devnet.db
+__pycache__/
+*.pyc
+*.png
+
+# Editor / OS
+.vscode/
+.DS_Store
+Thumbs.db
+
+docs/SETUP.md

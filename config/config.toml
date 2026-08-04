@@ -13,12 +13,21 @@
 # MODEL PROVIDER
 # A Pi 4 (4GB) cannot run a local model with reliable tool-calling. Use hosted.
 # ---------------------------------------------------------------------------
-[providers.models.anthropic.main]                      # [V] providers.models.<type>.<alias>
-model = "claude-sonnet-5"
-api_key = "sk-ant-REDACTED"                            # encrypted at rest when secrets.encrypt = true
-
-[providers.models.anthropic.cheap]
-model = "claude-haiku-4-5-20251001"                    # used by the payment-poll SOP: runs every minute, keep it cheap
+[providers.models.gemini.main]                         # [V] providers.models.<type>.<alias>
+model = "gemini-3.6-flash"                        # check current ID in Google AI Studio
+api_key = "REDACTED"                                   # encrypted at rest when secrets.encrypt = true
+timeout_secs = 30                                      # [V]
+# Optional keys if you need them: uri (full endpoint override), temperature, max_tokens
+#
+# NOTE: `gemini` = HTTP API with an api_key (what you want).
+#       `gemini_cli` is a DIFFERENT family that shells out to the local `gemini`
+#       CLI binary — do not use it here.
+#
+# DATA DISCLOSURE: Gemini's free tier may use inputs to improve Google's models.
+# Customer handles, item names, and refund payer addresses pass through the model.
+# OTPs, the RPC key, and the ledger never do — those paths have no model in them.
+# Declared in the README threat model. A production operator should use a paid
+# tier or a local model.
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +102,9 @@ skills = ["solana-pay-invoice", "dispense-otp", "refund"]   # [?] confirm key na
 [agents.solvend]                                       # [V] agents.<alias>
 enabled = true                                         # [V]
 channels = ["whatsapp.shop", "telegram.operator"]      # [V]
-model_provider = "providers.models.anthropic.main"     # [V] dotted reference
+model_provider = "gemini.main"                         # [V] "<type>.<alias>" — NOT the full
+                                                       # providers.models.* path. Validated at
+                                                       # startup, so a wrong value fails loudly.
 risk_profile = "vending"                               # [V]
 runtime_profile = "vending"                            # [V]
 skill_bundles = ["solvend"]                            # [V]

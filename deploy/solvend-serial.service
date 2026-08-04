@@ -4,10 +4,12 @@ After=multi-user.target
 
 [Service]
 Type=simple
-User=zeroclaw
+User=pi
 Group=dialout
-# dialout is what grants /dev/ttyUSB0; the zeroclaw user needs it:
-#   sudo usermod -aG dialout zeroclaw
+# NOTE: `pi` = your normal login user. There is no `zeroclaw` system user —
+# ZeroClaw itself runs as YOU under `systemctl --user`. Change this line if your
+# username is not `pi`. dialout is what grants /dev/ttyUSB0:
+#   sudo usermod -aG dialout $USER   (then log out and back in)
 EnvironmentFile=/etc/solvend/env
 ExecStart=/usr/bin/python3 /opt/solvend/solvend-serial.py
 Restart=always

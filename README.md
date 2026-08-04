@@ -170,6 +170,12 @@ twice.
   paid customer gets no drink. It **cannot** manufacture a payment, because
   validation reads finalized balance deltas. Failure mode is a stuck invoice,
   not a stolen one, and the operator can settle by hand.
+- **The model provider sees customer messages.** Handles, item names, and — in
+  refund conversations — the on-chain payer address pass through the LLM. This
+  build runs Gemini's free tier, whose terms allow inputs to be used for model
+  improvement. A production operator should use a paid tier (no training) or a
+  local model. **No OTP, RPC key, or ledger data reaches the provider** — code
+  delivery and payment validation have no model in the path at all.
 - **Shoulder-surfing at the keypad.** Same threat model as any vending machine.
 - **No third party holds a key.** No MCP server, no facilitator, no custodian.
 
