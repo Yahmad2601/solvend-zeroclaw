@@ -3,5 +3,9 @@
 # Install: /opt/solvend/bin/solvend-run.sh-invoice (chmod 750, root:zeroclaw)
 # Usage:   solvend-run.sh-invoice <item> <channel> <handle>
 set -eu
+# set -a: see solvend-run.sh. Without it the sourced values stay shell-local and
+# never reach python — new_invoice.py would price against a placeholder merchant.
+set -a
 . /etc/solvend/env
+set +a
 exec python3 /opt/solvend/skills/solana-pay-invoice/scripts/new_invoice.py "$@"

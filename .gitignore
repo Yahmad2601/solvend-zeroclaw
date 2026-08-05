@@ -24,3 +24,6 @@ __pycache__/
 Thumbs.db
 
 docs/SETUP.md
+HANDOFF.md
+.invoice_uri.txt
+fresh.json

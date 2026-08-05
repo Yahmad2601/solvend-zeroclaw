@@ -14,7 +14,11 @@
 #
 # Install: /opt/solvend/bin/solvend-poll.sh (chmod 750, root:zeroclaw)
 set -eu
+# set -a: see solvend-run.sh. Without it `watch` below runs against the default
+# mainnet RPC and a placeholder merchant, so it would never see a payment.
+set -a
 . /etc/solvend/env
+set +a
 
 OUT=$(python3 /opt/solvend/solvend.py watch 2>/dev/null) || exit 0
 [ -n "$OUT" ] || exit 0

@@ -52,6 +52,7 @@ OTP_TTL_SECS = 15 * 60
 MAX_OTP_ATTEMPTS = 5          # per invoice, then the OTP is dead
 RPC_TIMEOUT_SECS = 10
 SIG_LOOKBACK = 10             # signatures per reference per poll
+ATA_LOOKBACK = 25             # signatures per merchant token account per poll
 
 DB_PATH = os.environ.get("SOLVEND_DB", "/var/lib/solvend/solvend.db")
 
@@ -113,21 +114,19 @@ def rpc(method: str, params: list, _transport=None) -> dict:
         return json.loads(resp.read())
 
 
-def validate_transfer(tx: dict, amount_base: int) -> bool:
-    """True only if this transaction actually moved >= amount_base USDC to MERCHANT.
+def merchant_delta(tx: dict):
+    """USDC base units this transaction moved to MERCHANT, or None if it cannot
+    count: no tx, or the tx failed on chain (a failed tx still gets a signature).
 
-    A signature on the reference key proves nothing: the reference is a public
-    read-only account and anyone can attach it to any transaction. So we ignore
-    the reference entirely here and read the merchant's own token balance delta
-    out of transaction metadata. Balance deltas cannot be spoofed by instruction
-    shape, inner-instruction nesting, or CPI tricks the way naive instruction
-    parsing can.
+    Reading the merchant's own balance delta out of transaction metadata is the
+    whole anti-spoof story. Balance deltas cannot be faked by instruction shape,
+    inner-instruction nesting, or CPI tricks the way naive instruction parsing can.
     """
     if not tx:
-        return False
+        return None
     meta = tx.get("meta") or {}
-    if meta.get("err") is not None:          # a failed tx still gets a signature
-        return False
+    if meta.get("err") is not None:
+        return None
 
     def merchant_usdc(entries):
         for e in entries or []:
@@ -135,9 +134,25 @@ def validate_transfer(tx: dict, amount_base: int) -> bool:
                 return int(e["uiTokenAmount"]["amount"])
         return 0
 
-    delta = merchant_usdc(meta.get("postTokenBalances")) - merchant_usdc(
+    return merchant_usdc(meta.get("postTokenBalances")) - merchant_usdc(
         meta.get("preTokenBalances")
     )
+
+
+def validate_transfer(tx: dict, amount_base: int) -> bool:
+    """True only if this transaction actually moved >= amount_base USDC to MERCHANT.
+
+    A signature on the reference key proves nothing: the reference is a public
+    read-only account and anyone can attach it to any transaction. So we ignore
+    the reference entirely here and read the merchant's own token balance delta
+    out of transaction metadata.
+
+    This is the sole authorization decision for a payment. Both discovery paths
+    (reference lookup and the merchant-account fallback) must clear it.
+    """
+    delta = merchant_delta(tx)
+    if delta is None:
+        return False
     return delta >= amount_base           # overpayment settles; underpayment does not
 
 
@@ -162,6 +177,93 @@ def check_reference(ref: str, amount_base: int, _transport=None):
         ).get("result")
         if validate_transfer(tx, amount_base):
             return sig
+    return None
+
+
+def scan_merchant_payments(_transport=None, since: int = 0) -> list:
+    """Recent settled USDC payments into the merchant's own token account.
+
+    Fallback discovery for wallets that drop the Solana Pay `reference` account.
+    Field-tested: Phantom omitted it on every devnet payment we made, Solflare
+    attached it on every one. A customer whose wallet strips the reference still
+    pays real money, and a vending machine that keeps it without dispensing is
+    the worst failure this system could have.
+
+    This changes *discovery* only, never authorization: every candidate returned
+    here is still put through validate_transfer before it can settle anything.
+
+    `since` is the creation time of the oldest open invoice. Nothing older can
+    ever bind (match_unreferenced enforces it), and getSignaturesForAddress
+    returns newest-first with a blockTime on each entry, so we stop walking at
+    that boundary and never fetch those transactions at all. Without it a shop
+    with months of history would pull ATA_LOOKBACK transactions every minute.
+    """
+    accounts = rpc("getTokenAccountsByOwner",
+                   [MERCHANT, {"mint": USDC_MINT}, {"encoding": "jsonParsed"}],
+                   _transport).get("result") or {}
+    payments = []
+    for acc in accounts.get("value") or []:
+        pubkey = acc.get("pubkey")
+        if not pubkey:
+            continue
+        sigs = rpc("getSignaturesForAddress",
+                   [pubkey, {"limit": ATA_LOOKBACK, "commitment": "finalized"}],
+                   _transport).get("result") or []
+        for entry in sigs:
+            # Newest-first: once we are past the oldest open invoice, everything
+            # remaining is older still. Stop before spending a getTransaction.
+            bt = entry.get("blockTime")
+            if since and bt is not None and bt < since:
+                break
+            if entry.get("err") is not None:
+                continue
+            tx = rpc("getTransaction",
+                     [entry["signature"], {"encoding": "jsonParsed",
+                                           "maxSupportedTransactionVersion": 0,
+                                           "commitment": "finalized"}],
+                     _transport).get("result")
+            delta = merchant_delta(tx)
+            if delta is None or delta <= 0:
+                continue
+            payments.append({"signature": entry["signature"],
+                             "block_time": tx.get("blockTime") or 0,
+                             "delta": delta,
+                             "tx": tx})
+    payments.sort(key=lambda p: p["block_time"])       # oldest first: FIFO binding
+    return payments
+
+
+def match_unreferenced(payments: list, amount_base: int, created_at: int,
+                       used: set):
+    """-> signature of a payment that can settle this invoice, or None.
+
+    Deliberately stricter than the reference path, because without a reference
+    the chain carries no statement of intent and we are inferring the binding:
+
+      * exact amount, not >=. An overpayment settles a referenced invoice, but
+        here it would let a 2.50 energy payment satisfy an older 1.00 water
+        invoice. Exactness keeps items from cross-binding.
+      * paid at or after the invoice existed. Otherwise a stray earlier transfer
+        would retroactively settle the next invoice someone creates.
+      * signature not already spent on another invoice. The UNIQUE index on
+        `signature` is the real backstop; this keeps us from relying on an
+        IntegrityError for ordinary control flow.
+
+    Ambiguity is resolved oldest-payment-first against oldest-invoice-first
+    (cmd_watch iterates by created_at), so two identical concurrent invoices are
+    filled in the order they were raised. Anything it cannot bind is left for the
+    operator rather than guessed at.
+    """
+    for p in payments:
+        if p["signature"] in used:
+            continue
+        if p["delta"] != amount_base:
+            continue
+        if p["block_time"] < created_at:
+            continue
+        if not validate_transfer(p["tx"], amount_base):
+            continue                      # authorization, same gate as always
+        return p["signature"]
     return None
 
 
@@ -226,14 +328,34 @@ def cmd_watch(_transport=None) -> dict:
         expired = [r["invoice_id"] for r in cur.fetchall()]
 
         open_invoices = conn.execute(
-            "SELECT invoice_id, reference, amount_base, item, channel, handle"
-            " FROM invoices WHERE status='AWAITING_PAYMENT' ORDER BY created_at"
+            "SELECT invoice_id, reference, amount_base, item, channel, handle,"
+            " created_at FROM invoices WHERE status='AWAITING_PAYMENT'"
+            " ORDER BY created_at"
         ).fetchall()
+
+        # Signatures already spent on some invoice. Seeded from the ledger so a
+        # payment cannot settle twice across separate ticks, then extended as we
+        # settle within this tick.
+        used_sigs = {r["signature"] for r in conn.execute(
+            "SELECT signature FROM invoices WHERE signature IS NOT NULL")}
+
+        # The merchant-account scan is per-tick, not per-invoice: fetched at most
+        # once, only if some invoice actually needs the fallback, and reused for
+        # the rest. Keeps a busy ledger from multiplying RPC calls.
+        scanned = []
+        did_scan = False
 
         # 2. Poll only open invoices. Zero open invoices == zero RPC calls.
         for inv in open_invoices:
             try:
                 sig = check_reference(inv["reference"], inv["amount_base"], _transport)
+                if not sig:
+                    if not did_scan:
+                        oldest = min(i["created_at"] for i in open_invoices)
+                        scanned = scan_merchant_payments(_transport, oldest)
+                        did_scan = True
+                    sig = match_unreferenced(scanned, inv["amount_base"],
+                                             inv["created_at"], used_sigs)
             except (urllib.error.URLError, OSError, ValueError, KeyError):
                 errors += 1          # transient RPC failure: leave it open, retry next tick
                 continue
@@ -250,6 +372,7 @@ def cmd_watch(_transport=None) -> dict:
             except sqlite3.IntegrityError:
                 errors += 1          # signature already settled another invoice: replay, skip
                 continue
+            used_sigs.add(sig)       # no second invoice takes it later in this tick
             newly_paid.append({
                 "invoice_id": inv["invoice_id"],
                 "item": inv["item"],

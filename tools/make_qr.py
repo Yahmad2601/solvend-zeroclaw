@@ -28,11 +28,28 @@ def main() -> int:
     qr = qrcode.QRCode(border=2)
     qr.add_data(uri)
     qr.make(fit=True)
-    qr.print_ascii(invert=True)     # invert = scannable on a dark terminal
 
+    # Write the PNG first: the terminal render below is the fragile step, and
+    # losing the scannable file to a console encoding error would be the worst
+    # possible failure right when you are trying to pay an invoice.
     if len(sys.argv) > 2:
         qr.make_image().save(sys.argv[2])
-        print(f"\nsaved {sys.argv[2]}")
+        print(f"saved {sys.argv[2]}\n")
+
+    # print_ascii draws with U+2588 block characters. A Windows console on the
+    # legacy cp1252 code page cannot encode those and raises UnicodeEncodeError,
+    # so ask for UTF-8 first and degrade to a PNG rather than dying.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except (AttributeError, OSError):
+        pass
+    try:
+        qr.print_ascii(invert=True)     # invert = scannable on a dark terminal
+    except UnicodeEncodeError:
+        print("terminal cannot render block characters — "
+              "re-run with a PNG path:\n"
+              f'  python tools/make_qr.py "{uri[:40]}…" invoice.png')
+        return 1
     return 0
 
 

@@ -226,6 +226,94 @@ amb = {"meta": {"err": None, "preTokenBalances": [
 check("two candidate payers resolves to None",
       solvend.resolve_payer("SIG1", transport_for(amb)) is None)
 
+print("\nfallback — wallets that strip the Solana Pay reference")
+# Phantom dropped the reference account on every devnet payment we made;
+# Solflare attached it on every one. The money still arrives, so detection has
+# to survive a reference that never reaches the chain.
+MERCHANT_ATA = "MERCHANTATA11111111111111111111111111111111"
+
+
+def fallback_transport(payments, ata=MERCHANT_ATA):
+    """RPC mock where the reference is invisible (as a stripping wallet leaves it)
+    but the merchant's own token account still shows the transfers."""
+    by_sig = {p["sig"]: p for p in payments}
+
+    def _t(method, params):
+        if method == "getTokenAccountsByOwner":
+            return {"result": {"value": [{"pubkey": ata}]}}
+        if method == "getSignaturesForAddress":
+            if params[0] != ata:
+                return {"result": []}          # reference was never attached
+            # real RPC returns newest-first, with a blockTime per entry
+            ordered = sorted(payments, key=lambda p: p["block_time"], reverse=True)
+            return {"result": [{"signature": p["sig"], "err": p.get("err"),
+                                "blockTime": p["block_time"]} for p in ordered]}
+        if method == "getTransaction":
+            p = by_sig.get(params[0])
+            if not p:
+                return {"result": None}
+            body = tx(pre=p.get("pre", 0), post=p.get("post", 1_500_000),
+                      err=p.get("err"))
+            body["blockTime"] = p["block_time"]
+            return {"result": body}
+        return {"result": None}
+    return _t
+
+
+def pay(sig, post=1_500_000, offset=5, err=None, pre=0):
+    return {"sig": sig, "post": post, "pre": pre, "err": err,
+            "block_time": solvend.now() + offset}
+
+
+fresh()
+r = solvend.cmd_watch(fallback_transport([pay("FB1")]))
+check("stripped reference still settles via merchant account",
+      len(r["newly_paid"]) == 1)
+check("fallback mints a usable OTP",
+      len(r["newly_paid"][0]["otp"]) == 4 if r["newly_paid"] else False)
+
+# Replay across ticks: the ledger already holds that signature.
+fresh(ref="REF2")
+solvend.cmd_watch(fallback_transport([pay("FB2")]))
+with solvend.db() as c:
+    c.execute("INSERT INTO invoices (invoice_id, reference, item, amount_base,"
+              " channel, handle, status, created_at) VALUES"
+              " ('INV-0002','REF3','cola',1500000,'whatsapp.shop','+5511999',"
+              " 'AWAITING_PAYMENT', ?)", (solvend.now(),))
+r = solvend.cmd_watch(fallback_transport([pay("FB2")]))
+check("one payment cannot settle a second invoice", r["newly_paid"] == [])
+
+fresh()
+r = solvend.cmd_watch(fallback_transport([pay("FB3", post=2_500_000)]))
+check("overpayment does NOT cross-bind via fallback", r["newly_paid"] == [])
+
+fresh()
+r = solvend.cmd_watch(fallback_transport([pay("FB4", post=1_000_000)]))
+check("underpayment rejected by fallback", r["newly_paid"] == [])
+
+fresh()
+r = solvend.cmd_watch(fallback_transport([pay("FB5", offset=-3600)]))
+check("payment older than the invoice never binds", r["newly_paid"] == [])
+
+fresh()
+r = solvend.cmd_watch(fallback_transport([pay("FB6", err={"e": 1})]))
+check("failed tx rejected by fallback", r["newly_paid"] == [])
+
+# Two identical live invoices, a single payment: exactly one may settle.
+fresh()
+with solvend.db() as c:
+    c.execute("INSERT INTO invoices (invoice_id, reference, item, amount_base,"
+              " channel, handle, status, created_at) VALUES"
+              " ('INV-0002','REF9','cola',1500000,'whatsapp.shop','+5511999',"
+              " 'AWAITING_PAYMENT', ?)", (solvend.now(),))
+r = solvend.cmd_watch(fallback_transport([pay("FB7")]))
+check("one payment settles exactly one of two identical invoices",
+      len(r["newly_paid"]) == 1 and r["pending"] == 1)
+
+fresh()
+r = solvend.cmd_watch(fallback_transport([pay("FB8")]))
+check("fallback keeps the watch payload small", len(json.dumps(r)) < 400)
+
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 for f in FAIL:
     print(f"  FAILED: {f}")
