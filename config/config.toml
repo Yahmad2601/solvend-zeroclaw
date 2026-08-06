@@ -118,7 +118,12 @@ timeout_secs = 300                                     # [V] default 120
 on_no_approver = "deny"                                # [V] fail closed — this is the line judges look for
 
 [runtime_profiles.vending]                             # [V] runtime_profiles.<alias>
-max_iterations = 8                                     # [?] caps a runaway tool loop
+# 3, not 8. The agent's whole job is: parse the item, call new_invoice once,
+# paste the URI back. Three iterations covers that with room to spare. Lowered
+# 2026-08-06 because every unused iteration is still a billable model request —
+# on Gemini's free tier (5 requests/minute) a single "I need a cola" could burn
+# the entire per-minute budget in retries and 429 the customer mid-purchase.
+max_iterations = 3                                     # [?] caps a runaway tool loop
 
 
 # ---------------------------------------------------------------------------

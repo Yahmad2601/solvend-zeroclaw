@@ -1,10 +1,10 @@
 # SolVend
 
-**A physical vending machine that takes USDC over WhatsApp, run entirely from a
+**A physical vending machine that takes USDC over Telegram, run entirely from a
 Raspberry Pi you own.**
 
 Customer DMs the shop: `cola`. Agent replies with a Solana Pay QR. They pay
-1.50 USDC from any wallet. ~60 seconds later WhatsApp buzzes with a 4-digit
+1.50 USDC from any wallet. ~60 seconds later the bot sends a 4-digit
 code. They punch it into the keypad and a gantry drops the can.
 
 Built on stock [ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw) — Tier 1,
@@ -16,7 +16,7 @@ no plugins, no WASM, no MCP server. Custody **T1: no keys held.**
 
 ## Who this is for
 
-The corner shop that already runs its business out of WhatsApp and wants to
+The corner shop that already runs its business out of a chat app and wants to
 take stablecoins without a payment processor, a merchant account, or a POS
 terminal. Hardware is a Pi 4 and an ESP32. Setup is an evening.
 
@@ -24,7 +24,7 @@ terminal. Hardware is a Pi 4 and an ESP32. Setup is an evening.
 
 ```mermaid
 flowchart LR
-  C[Customer<br/>WhatsApp] -->|"cola"| Z[ZeroClaw agent<br/>Raspberry Pi 4]
+  C[Customer<br/>Telegram] -->|"cola"| Z[ZeroClaw agent<br/>Raspberry Pi 4]
   Z -->|Solana Pay QR| C
   C -->|pays USDC| SOL[(Solana<br/>mainnet)]
   P[solvend-poll.sh<br/>cron, 0 tokens] -->|getSignaturesForAddress<br/>+ getTransaction| SOL
@@ -48,11 +48,26 @@ That split is also a security boundary. The previous build of this machine kept
 Wi-Fi credentials and an API key in ESP32 flash, in a device sitting in a public
 shop. **Those secrets no longer exist.** Dump the flash and you get pin numbers.
 
-**WhatsApp web mode, not Cloud API.** Cloud API is a webhook receiver: Meta must
-reach `https://<public>/whatsapp/<alias>`, which on a shop Pi means a tunnel.
-Web mode is an outbound client — no public URL, no tunnel, no Meta app review,
+**Telegram long-polling, not inbound webhooks.** A webhook receiver needs the
+provider to reach `https://<public>/…`, which on a shop Pi means a tunnel.
+Long-polling is an outbound client — no public URL, no tunnel, no app review,
 works behind NAT. (This also follows the bounty's trap #7: design for polling,
 not inbound ingress.)
+
+**Two separate bots.** `telegram.shop` faces customers; `telegram.operator`
+receives refund approvals. Two bots rather than one with two aliases, so
+"approvals leave the customer's reach" is structural — a customer messaging the
+shop bot has no path to the approval route — instead of resting on a chat-id
+membership check that one config mistake could collapse.
+
+> **Why not WhatsApp?** This was built for WhatsApp web mode and moved late.
+> `zeroclaw channel list` on the target Pi reports WhatsApp **"configured, not
+> compiled"** — the stock release binary ships without that channel, so no
+> configuration can enable it; only a from-source build (`--features
+> channels-full`) would. The swap cost four config lines and no code, because
+> `solvend.py` contains no channel logic at all: the channel is a string in a
+> ledger column. Telegram long-polls too, so every ingress property above is
+> unchanged.
 
 ## Safety & custody
 
@@ -113,6 +128,42 @@ inner-instruction nesting, or CPI indirection the way naive instruction parsing
 can. Rejected and tested: underpayment, wrong recipient, wrong mint,
 failed-but-signed transactions, and pre-existing balances being double-counted.
 
+### Detection cannot depend on the customer's wallet
+
+The Solana Pay `reference` account is the normal way a merchant locates the
+paying transaction. On devnet we found **real wallets that silently omit it**:
+the payment lands, the money arrives, and `getSignaturesForAddress(reference)`
+returns an empty list. Verified by reading the settling transaction's account
+keys — the reference simply isn't among them. For a vending machine that is the
+worst available failure: it takes the money and dispenses nothing.
+
+So detection doesn't rely on it. `check_reference` runs first; when it returns
+`None`, [`scan_merchant_payments`](solvend/solvend.py) reads the merchant's own
+USDC token account instead.
+
+This changed **discovery only, never authorization** — `validate_transfer` is
+still the sole gate, and all three structural defenses above are untouched. The
+reference was only ever an index; it never carried authority.
+
+The fallback is deliberately *stricter* than the reference path, because without
+a reference the chain states no intent and the binding is inferred:
+
+- **exact amount**, not `>=` — otherwise a 2.50 energy payment could settle an
+  older 1.00 water invoice
+- payment `blockTime >= invoice.created_at` — a stray earlier transfer can't
+  retroactively settle a later invoice
+- signature not already spent, seeded from the ledger each tick, with the
+  `UNIQUE` index on `signature` as the real backstop
+
+It is scanned once per tick rather than per invoice, and cut off at the oldest
+open invoice's `created_at` using the `blockTime` on each signature entry, so a
+shop with months of history never re-fetches it. Live `watch` stays under 3s.
+
+Proven end to end on devnet against both wallet behaviours: one payment carrying
+a reference, one with it stripped, both settling and dispensing correctly. Nine
+of the 50 tests cover this path, including replay across ticks and two
+concurrent invoices contending for one payment.
+
 ### Refunds
 
 Agent calls `sop_execute` → [`sops/refund-request`](sops/refund-request/) →
@@ -171,17 +222,21 @@ twice.
   validation reads finalized balance deltas. Failure mode is a stuck invoice,
   not a stolen one, and the operator can settle by hand.
 - **The model provider sees customer messages.** Handles, item names, and — in
-  refund conversations — the on-chain payer address pass through the LLM. This
-  build runs Gemini's free tier, whose terms allow inputs to be used for model
-  improvement. A production operator should use a paid tier (no training) or a
-  local model. **No OTP, RPC key, or ledger data reaches the provider** — code
+  refund conversations — the on-chain payer address pass through the LLM. Run a
+  **paid** provider tier: free tiers commonly permit inputs to be used for model
+  improvement, and Gemini's free tier is in any case capped at 5 requests/minute,
+  which a tool-calling turn exhausts on its own. A local model also works. **No OTP, RPC key, or ledger data reaches the provider** — code
   delivery and payment validation have no model in the path at all.
 - **Shoulder-surfing at the keypad.** Same threat model as any vending machine.
+- **Two concurrent same-amount invoices, paid without a reference,** cannot be
+  told apart from chain data. They are filled oldest-invoice-first. Correct for a
+  single-slot machine; stated here because it would not be for a bank of them.
 - **No third party holds a key.** No MCP server, no facilitator, no custodian.
 
 ## Cost
 
-The minute poller is a **`[cron.solvend_poll]` shell job, not an agentic run.**
+The minute poller is a **cron shell job, not an agentic run** (registered with
+`zeroclaw cron add`, no `--agent` flag).
 1,440 chain checks a day at **zero tokens**. On a quiet night it costs nothing.
 
 OTP delivery goes out via `zeroclaw channel send` — a fixed template with a code
@@ -213,7 +268,7 @@ dependency.
 |---|---|
 | [`config/config.toml`](config/config.toml) | ZeroClaw config, secrets redacted, keys annotated `[V]`/`[?]` |
 | [`solvend/solvend.py`](solvend/solvend.py) | State machine, RPC validation, refunds. Stdlib only |
-| [`solvend/test_solvend.py`](solvend/test_solvend.py) | 41 tests, mocked RPC, no live network |
+| [`solvend/test_solvend.py`](solvend/test_solvend.py) | 50 tests, mocked RPC, no live network |
 | [`solvend/solvend-serial.py`](solvend/solvend-serial.py) | ESP32 keypad daemon |
 | [`solvend/bin/`](solvend/bin/) | Env wrappers + the zero-token poller |
 | [`skills/`](skills/) | `solana-pay-invoice`, `dispense-otp`, `refund` |
@@ -227,47 +282,105 @@ dependency.
 **Hardware:** Raspberry Pi 4 (4GB), ESP32 devkit, 16x2 I2C LCD, 4x3 keypad,
 A4988 + stepper, 4x servo, buzzer, USB A→micro-B cable.
 
+### 0. Pi base
+
+```bash
+scp deploy/pi-bootstrap.sh pi@solvend.local:~
+ssh pi@solvend.local 'bash pi-bootstrap.sh'   # deps, timezone, NTP, dialout
+ssh pi@solvend.local 'sudo reboot'            # if it asks (group change)
+ssh pi@solvend.local 'bash pi-bootstrap.sh --check'
+```
+
+Exits non-zero unless the box is genuinely ready. It verifies two things that
+otherwise fail *silently, much later*: an unsynchronised clock (the Pi has no
+RTC, and every OTP expiry is computed from it) and `dialout` membership, whose
+absence surfaces three phases away as a serial permission error.
+
 ### 1. ZeroClaw
 
 ```bash
 # install ZeroClaw, then:
-zeroclaw onboard          # pair WhatsApp (web mode) + Telegram bot
+zeroclaw daemon           # NOT `zeroclaw start` — that subcommand doesn't exist
 ```
 
-Copy [`config/config.toml`](config/config.toml) to `~/.zeroclaw/config.toml` and
-fill in your provider key, Telegram bot token, and operator chat ID.
+Create **two** Telegram bots in BotFather — one customer-facing, one for
+operator approvals. Copy [`config/config.toml`](config/config.toml) to
+`~/.zeroclaw/config.toml` and fill in the provider key, both bot tokens, and
+your operator chat ID.
+
+Three config details that cost real debugging time, each verified against a
+running install:
+
+- **`schema_version = 3` must be the first line.** Without it ZeroClaw assumes a
+  pre-v3 layout: the file parses, `doctor` reports the model provider valid, and
+  the `api_key` sitting in the file is never read.
+- **The provider alias must be `default`** — `[providers.models.gemini.default]`
+  with `model_provider = "gemini.default"`. Any other alias is silently ignored,
+  reported as "no api_key set" against a section that plainly has one.
+- **Don't add sub-tables ZeroClaw doesn't define.** An invented
+  `[http_request.secrets.*]` table made the *entire* `http_request` section
+  "malformed and reset to defaults" — restoring `allowed_domains = ["*"]` and
+  disabling the SSRF guard, as a **warning** while the summary still read zero
+  errors.
+
+Run `zeroclaw daemon` as a service so it survives your SSH session:
+
+```bash
+zeroclaw service install
+systemctl --user enable --now zeroclaw
+loginctl enable-linger "$USER"
+zeroclaw doctor           # want 0 errors before continuing
+```
 
 ### 2. SolVend core
 
 ```bash
-sudo mkdir -p /opt/solvend /var/lib/solvend /etc/solvend
-sudo cp -r solvend/* /opt/solvend/
-sudo cp -r skills /opt/solvend/skills
-sudo chown -R zeroclaw:zeroclaw /var/lib/solvend
-sudo chmod 750 /opt/solvend/bin/*
-
-sudo tee /etc/solvend/env >/dev/null <<'EOF'
-SOLVEND_RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_KEY
-SOLVEND_RECIPIENT=YourMerchantPubkey
-SOLVEND_DB=/var/lib/solvend/solvend.db
-SOLVEND_HOME=/opt/solvend
-EOF
-sudo chmod 600 /etc/solvend/env && sudo chown root:zeroclaw /etc/solvend/env
-
-sudo -u zeroclaw SOLVEND_DB=/var/lib/solvend/solvend.db \
-  python3 /opt/solvend/solvend.py init-db
+bash deploy/pi-deploy.sh \
+  --rpc-url 'https://mainnet.helius-rpc.com/?api-key=YOUR_KEY' \
+  --recipient <merchant pubkey>
 ```
 
-The RPC key reaches the process through systemd `EnvironmentFile` — never
-through config text the model can read, never in code (bounty trap #5).
+Copies the code, writes `/etc/solvend/env` under `umask 077` (never echoed, never
+overwritten without `--force`), refuses placeholder values, initialises the
+ledger, and then verifies — permissions, ledger writability, and a **live RPC
+round-trip through the real wrapper** so a bad key fails here rather than at a
+customer's first purchase.
 
-### 3. Skills and SOPs
+Two permission details it gets right, both of which break a hand-rolled install:
+
+- `sudo cp` leaves `/opt/solvend/bin/*` owned **root:root**; `chmod 750` then
+  grants execute to root only and the login user gets "Permission denied". The
+  scripts are `chown root:<user>` + `750`.
+- `/etc/solvend/env` at **600 root:<user>** is readable by root alone, so the
+  wrappers can't source it. It is **640**.
+
+The RPC key reaches the process through the env file — never through config text
+the model can read, never in code (bounty trap #5).
+
+### 3. Skills, SOPs, and the poller
 
 ```bash
-cp -r skills/*   <install>/data/skills/
-cp -r sops/*     <install>/agents/solvend/workspace/sops/
+zeroclaw skills install skills/solana-pay-invoice --bundle solvend
+zeroclaw skills install skills/dispense-otp       --bundle solvend
+zeroclaw skills install skills/refund             --bundle solvend
+zeroclaw skills list      # all three, under [bundle: solvend]
+
+cp -r sops/* <install>/agents/solvend/workspace/sops/
 zeroclaw sop validate && zeroclaw sop list
 ```
+
+Skills install into `~/.zeroclaw/shared/skills/<bundle>/` — copying them into
+`data/skills/` instead lands files ZeroClaw never reads.
+
+The minute poller is registered through the CLI, **not** a `[cron.*]` block in
+the config — `zeroclaw config migrate` deletes a hand-written one:
+
+```bash
+zeroclaw cron add '* * * * *' '/opt/solvend/bin/solvend-poll.sh'
+zeroclaw cron list
+```
+
+Omitting `--agent` is what makes it a shell job — the zero-token path.
 
 ### 4. Serial daemon
 
@@ -288,7 +401,7 @@ gantry build.
 ### 6. Test without hardware
 
 ```bash
-cd solvend && python3 test_solvend.py       # 41 passed, 0 failed
+cd solvend && python3 test_solvend.py       # 50 passed, 0 failed
 
 # bench the serial bridge with no ESP32 attached:
 socat -d -d pty,raw,echo=0 pty,raw,echo=0   # note the two /dev/pts/N
@@ -342,18 +455,31 @@ payer. The attack completes the entire workflow and still fails.
 ## Test output
 
 ```
-«FILL: paste `python3 test_solvend.py` output — 41 passed, 0 failed»
+«FILL: paste `python3 test_solvend.py` output — 50 passed, 0 failed»
 ```
 
-## Config keys still to verify
+## Component boundaries
 
-Annotated `[?]` in [`config/config.toml`](config/config.toml). ZeroClaw's config
-surface is large and the docs don't render every key. Verified as working on
-`«FILL: ZeroClaw version»`; anything marked `[?]` was confirmed empirically on
-this box rather than from documentation. Notable: `[cron.*]` key names
-(`schedule` vs `expression`, `kind`, `command`), whether `--channel-id` accepts a
-dotted alias, `[[tools]]` entry shape in `SKILL.toml`, and the approval group
-member scheme.
+ZeroClaw's config surface is large and the docs don't render every key. Each row
+below was an open question during the build, resolved empirically against
+`«FILL: ZeroClaw version»` rather than from documentation.
+
+| Question | Answer |
+|---|---|
+| Start the daemon | `zeroclaw daemon` — there is no `zeroclaw start`. As a service: `zeroclaw service install` → `systemctl --user enable --now zeroclaw` → `loginctl enable-linger` |
+| `schema_version` | **Required, first line.** Omit it and ZeroClaw reads the file as pre-v3: it parses, `doctor` calls the provider valid, and the `api_key` is never read |
+| Provider alias | Must be **`default`**. `[providers.models.gemini.default]` + `model_provider = "gemini.default"`. Another alias is ignored silently |
+| Secrets under `http_request` | **No such schema.** An invented `[http_request.secrets.*]` sub-table made the whole section malformed → reset to defaults → `allowed_domains = ["*"]`, SSRF guard off |
+| `[cron.*]` in TOML | **Not the mechanism.** `zeroclaw config migrate` deletes a hand-written block. Use `zeroclaw cron add '<expr>' '<command>'`; omit `--agent` for a shell job |
+| Skill install path | `zeroclaw skills install <path> --bundle <name>` (subcommand is `skills`, plural). Lands in `~/.zeroclaw/shared/skills/<bundle>/`, **not** `data/skills/` |
+| Approval group members | `members = ["telegram:<chat_id>"]` parses and validates |
+| `memory.search_mode` | Set `"bm25"` explicitly — the `"hybrid"` default warns about a missing embedding provider and silently degrades to keyword search |
+
+**The operability finding worth stating plainly:** two config sections were
+silently reset to defaults while the summary line read *0 errors* — the
+`http_request` domain lock and the payment poller. Both were reported as
+**warnings**, not errors. A section whose entire purpose is to be a security
+boundary is exactly the one you don't want failing open and quiet.
 
 Documented gotchas found while building:
 
