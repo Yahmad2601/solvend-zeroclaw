@@ -31,25 +31,34 @@ timeout_secs = 30                                      # [V]
 
 
 # ---------------------------------------------------------------------------
-# CHANNEL — WhatsApp in WEB mode
-# Web mode is an outbound client: no public URL, no tunnel, no Meta app review.
-# Cloud API mode (phone_number_id/access_token/verify_token/app_secret) needs
-# Meta to reach https://<public>/whatsapp/<alias> — avoid it on a home Pi.
+# CHANNELS — two Telegram bots, deliberately separate
+#
+# Originally WhatsApp web mode. Changed 2026-08-06: `zeroclaw channel list` on
+# the Pi reports "WhatsApp (configured, not compiled)" — the stock release binary
+# ships without the WhatsApp feature, so no configuration can enable it. Getting
+# it needs a from-source build (`--features channels-full`), which on a Pi 4 is a
+# multi-hour Rust compile with real OOM risk. Telegram is compiled, long-polls
+# (so still no ingress, no tunnel, no app review), and costs the design nothing:
+# the customer talks to a chat bot either way.
+#
+# TWO SEPARATE BOTS, not one with two aliases. The security property is that
+# approvals leave the customer's reach — a customer must not be able to send
+# messages anywhere near the approval route. Same-bot separation would rest only
+# on the chat-id membership check; separate bots make it structural. Create the
+# second one in BotFather, it takes a minute.
 # ---------------------------------------------------------------------------
-[channels.whatsapp.shop]                               # [V] channels.whatsapp.<alias>
+[channels.telegram.shop]                               # [V] channels.telegram.<alias>
 enabled = true
-session_path = "/var/lib/zeroclaw/wa.db"               # [V] presence of this key selects web mode
-mode = "personal"                                      # [V] "personal" | "business"
+bot_token = "REDACTED-CUSTOMER-BOT"                    # customer-facing bot
 dm_policy = "all"                                      # [V] allowlist | ignore | all — customers DM the vending machine
 group_policy = "ignore"                                # [V] no group traffic
-self_chat_mode = false                                 # [V]
 interrupt_on_new_message = false                       # [V] never abandon a half-finished invoice
 
 # Operator channel. Telegram long-polls, so it also needs no ingress.
 # Approvals and refund checkpoints route here, NOT to the customer channel.
 [channels.telegram.operator]                           # [V] channels.telegram.<alias>
 enabled = true
-bot_token = "REDACTED"                                 # [V]
+bot_token = "REDACTED-OPERATOR-BOT"                    # [V] a DIFFERENT bot from telegram.shop
 
 
 # ---------------------------------------------------------------------------
@@ -68,8 +77,18 @@ max_response_size = 262144                             # [V] 256 KiB. Trap #3: a
 
 # RPC key handling. Bounty rule: keys live in config, never in code, never in a
 # skill body (skill text is model-visible and lands in the transcript).
-[http_request.secrets.helius]                          # [?] verify the injection placeholder syntax
-value = "REDACTED-HELIUS-KEY"
+#
+# There was a [http_request.secrets.helius] table here. REMOVED 2026-08-06:
+# ZeroClaw has no such schema, and an unrecognised sub-table does not fail
+# loudly — `zeroclaw doctor` reported "config section 'http_request' is malformed
+# and was reset to defaults", which silently restored allowed_domains = ["*"] and
+# turned off the SSRF guard. The one section whose whole job is to be a security
+# boundary was the one being discarded, and nothing about the running system
+# looked wrong. Verified fixed on the Pi: 0 errors once the table was gone.
+#
+# No key is needed here anyway. solvend.py reaches Helius via SOLVEND_RPC_URL from
+# /etc/solvend/env (chmod 600), never through the http_request tool — which stays
+# enabled and domain-locked as hardening, not as a dependency.
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +120,7 @@ skills = ["solana-pay-invoice", "dispense-otp", "refund"]   # [?] confirm key na
 # ---------------------------------------------------------------------------
 [agents.solvend]                                       # [V] agents.<alias>
 enabled = true                                         # [V]
-channels = ["whatsapp.shop", "telegram.operator"]      # [V]
+channels = ["telegram.shop", "telegram.operator"]      # [V]
 model_provider = "gemini.main"                         # [V] "<type>.<alias>" — NOT the full
                                                        # providers.models.* path. Validated at
                                                        # startup, so a wrong value fails loudly.
@@ -119,7 +138,7 @@ sops_dir = "/var/lib/zeroclaw/agents/solvend/workspace/sops"   # [?] confirm key
 # LEDGER LOCATION — deliberate. Invoice state lives in /var/lib/solvend/solvend.db,
 # owned by solvend.py, NOT in agent memory. Agent memory is written and read
 # through the model, which makes it non-atomic and injectable; "mark this invoice
-# paid" is a sentence someone can put in a WhatsApp message. Money state belongs
+# paid" is a sentence someone can put in a Telegram message. Money state belongs
 # behind a UPDATE...WHERE the model cannot reach.
 
 
