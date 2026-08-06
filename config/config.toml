@@ -146,6 +146,37 @@ risk_profile = "vending"                               # [V]
 runtime_profile = "vending"                            # [V]
 skill_bundles = ["solvend"]                            # [V]
 
+# ---------------------------------------------------------------------------
+# POLLER IDENTITY — separate on purpose
+#
+# A `zeroclaw cron add` job runs AS an agent and inherits that agent's risk
+# profile. Registering the poller under `solvend` fails, correctly:
+#   Error: blocked by security policy: Command not allowed: solvend-poll.sh
+# because [risk_profiles.vending] has allowed_commands = [].
+#
+# The wrong fix is to allow the script in `vending` — that hands shell execution
+# to the identity that talks to customers, which is the one thing this design is
+# built to prevent. Instead the poller gets its own agent with no channels, no
+# skills, and an allowlist of exactly one command. Nothing a customer says can
+# reach this identity: it has no channel to be reached on.
+# ---------------------------------------------------------------------------
+[risk_profiles.poller]
+allowed_commands = ["/opt/solvend/bin/solvend-poll.sh"]   # exactly one, absolute
+excluded_tools = ["browser", "file_download", "http_request"]
+forbidden_paths = ["~/.zeroclaw/config.toml", "/var/lib/zeroclaw"]
+
+[agents.solvend_poller]
+enabled = true
+channels = []                                          # unreachable by any customer
+model_provider = "gemini.default"                      # required by config; never invoked —
+                                                       # the cron job is a shell command, not a
+                                                       # --prompt, so no model call is made
+risk_profile = "poller"
+runtime_profile = "vending"
+
+[agents.solvend_poller.memory]
+enabled = false                                        # stateless: it reads SQL, not memory
+
 [agents.solvend.memory]                                # [V] per-agent memory backend
 enabled = true                                         # operator preferences and conversation continuity ONLY.
                                                        # The invoice ledger is NOT here — see note below.

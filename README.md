@@ -236,7 +236,7 @@ twice.
 ## Cost
 
 The minute poller is a **cron shell job, not an agentic run** (registered with
-`zeroclaw cron add`, no `--agent` flag).
+`zeroclaw cron add`, no `--prompt` flag).
 1,440 chain checks a day at **zero tokens**. On a quiet night it costs nothing.
 
 OTP delivery goes out via `zeroclaw channel send` — a fixed template with a code
@@ -376,11 +376,14 @@ The minute poller is registered through the CLI, **not** a `[cron.*]` block in
 the config — `zeroclaw config migrate` deletes a hand-written one:
 
 ```bash
-zeroclaw cron add '* * * * *' '/opt/solvend/bin/solvend-poll.sh'
+zeroclaw cron add --agent solvend '* * * * *' '/opt/solvend/bin/solvend-poll.sh'
 zeroclaw cron list
 ```
 
-Omitting `--agent` is what makes it a shell job — the zero-token path.
+`--agent` is required but does **not** make the job agentic — it only names the
+configured alias the job runs as. `<COMMAND>` is a **shell command by default**;
+`--prompt` is the opt-in that turns it into an agent prompt. Omitting `--prompt`
+is what keeps this the zero-token path.
 
 ### 4. Serial daemon
 
@@ -470,7 +473,8 @@ below was an open question during the build, resolved empirically against
 | `schema_version` | **Required, first line.** Omit it and ZeroClaw reads the file as pre-v3: it parses, `doctor` calls the provider valid, and the `api_key` is never read |
 | Provider alias | Must be **`default`**. `[providers.models.gemini.default]` + `model_provider = "gemini.default"`. Another alias is ignored silently |
 | Secrets under `http_request` | **No such schema.** An invented `[http_request.secrets.*]` sub-table made the whole section malformed → reset to defaults → `allowed_domains = ["*"]`, SSRF guard off |
-| `[cron.*]` in TOML | **Not the mechanism.** `zeroclaw config migrate` deletes a hand-written block. Use `zeroclaw cron add '<expr>' '<command>'`; omit `--agent` for a shell job |
+| `[cron.*]` in TOML | **Not the mechanism.** `zeroclaw config migrate` deletes a hand-written block. Use `zeroclaw cron add --agent <alias> '<expr>' '<command>'` |
+| Shell job vs agent prompt | `--agent` is **required** and only names the owning alias — it does not invoke the model. `<COMMAND>` is a shell command by default; **`--prompt`** is what makes it an agent prompt. A genuinely agent-less scheduled job still has to name an agent |
 | Skill install path | `zeroclaw skills install <path> --bundle <name>` (subcommand is `skills`, plural). Lands in `~/.zeroclaw/shared/skills/<bundle>/`, **not** `data/skills/` |
 | Approval group members | `members = ["telegram:<chat_id>"]` parses and validates |
 | `memory.search_mode` | Set `"bm25"` explicitly — the `"hybrid"` default warns about a missing embedding provider and silently degrades to keyword search |
