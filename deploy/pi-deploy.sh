@@ -40,6 +40,10 @@ sudo cp -r "$REPO/skills" /opt/solvend/skills
 # The ledger is written by both the agent and the serial daemon, so it must be
 # owned by the login user. /opt/solvend stays root-owned and read-only to them.
 sudo chown -R "$ME:$ME" /var/lib/solvend
+# `sudo cp` leaves these root:root. chmod 750 on root:root grants execute to root
+# and the root group only, so the login user — who actually runs them, via the
+# agent and via cron — gets "Permission denied". Group them to the login user.
+sudo chown root:"$ME" /opt/solvend/bin/* 2>/dev/null || true
 sudo chmod 750 /opt/solvend/bin/* 2>/dev/null || true
 echo "  code -> /opt/solvend, ledger dir -> /var/lib/solvend"
 
@@ -70,9 +74,13 @@ else
       echo "SOLVEND_SERIAL_PORT=${SOLVEND_SERIAL_PORT:-/dev/ttyUSB0}"
     } | sudo tee /etc/solvend/env >/dev/null
   )
-  sudo chmod 600 /etc/solvend/env
+  # 640, not 600. The wrappers source this file as the login user, and mode 600
+  # gives the group nothing — root:pi 600 is readable by root alone, so every
+  # wrapper fails on a file that looks correctly owned. 640 lets the pi group
+  # read it and still denies everyone else.
   sudo chown "root:$ME" /etc/solvend/env
-  echo "  written, chmod 600, root:$ME"
+  sudo chmod 640 /etc/solvend/env
+  echo "  written, chmod 640, root:$ME"
 fi
 
 # ---------------------------------------------------------------- ledger
@@ -87,7 +95,9 @@ chk() { if eval "$2" >/dev/null 2>&1; then echo "  ok    $1"; else echo "  FAIL 
 
 chk "/opt/solvend/solvend.py present"        "[ -f /opt/solvend/solvend.py ]"
 chk "/opt/solvend/skills present"            "[ -d /opt/solvend/skills ]"
-chk "env file is chmod 600"                  "[ \"\$(stat -c %a /etc/solvend/env)\" = 600 ]"
+chk "env file is chmod 640"                  "[ \"\$(stat -c %a /etc/solvend/env)\" = 640 ]"
+chk "env file readable by $ME"               "[ -r /etc/solvend/env ]"
+chk "wrappers executable by $ME"             "[ -x /opt/solvend/bin/solvend-run.sh ]"
 chk "env file owned root:$ME"                "[ \"\$(stat -c %U:%G /etc/solvend/env)\" = \"root:$ME\" ]"
 chk "ledger created"                         "[ -f /var/lib/solvend/solvend.db ]"
 chk "ledger writable by $ME"                 "[ -w /var/lib/solvend/solvend.db ]"

@@ -1,3 +1,11 @@
+# Must be the first line. Without it ZeroClaw assumes a pre-v3 layout and reads
+# provider fields from a different shape: `zeroclaw doctor` then reports
+# `model_provider "gemini.default" is valid` while also claiming "no api_key set"
+# and "no model configured" for that exact section, with the key sitting right
+# there in the file. Discovered 2026-08-06 — the original Pi config had this line
+# and worked; overwriting it with a copy that lacked it broke the provider.
+schema_version = 3
+
 # SolVend — ZeroClaw config
 # Target: ~/.zeroclaw/config.toml on the Raspberry Pi 4
 #
@@ -13,7 +21,12 @@
 # MODEL PROVIDER
 # A Pi 4 (4GB) cannot run a local model with reliable tool-calling. Use hosted.
 # ---------------------------------------------------------------------------
-[providers.models.gemini.main]                         # [V] providers.models.<type>.<alias>
+# Alias MUST be `default`. Was `main` until 2026-08-06: `zeroclaw doctor` then
+# reported `model_provider "gemini.default" is valid` alongside "gemini.default:
+# no api_key set" and "no model configured" — it was reading a `default` alias
+# while our key and model sat under `main`, which it silently ignored. The agent
+# had no credentials and no model, and nothing said so directly.
+[providers.models.gemini.default]                      # providers.models.<type>.<alias>
 model = "gemini-3.6-flash"                        # check current ID in Google AI Studio
 api_key = "REDACTED"                                   # encrypted at rest when secrets.encrypt = true
 timeout_secs = 30                                      # [V]
@@ -121,7 +134,7 @@ skills = ["solana-pay-invoice", "dispense-otp", "refund"]   # [?] confirm key na
 [agents.solvend]                                       # [V] agents.<alias>
 enabled = true                                         # [V]
 channels = ["telegram.shop", "telegram.operator"]      # [V]
-model_provider = "gemini.main"                         # [V] "<type>.<alias>" — NOT the full
+model_provider = "gemini.default"                      # [V] "<type>.<alias>" — NOT the full
                                                        # providers.models.* path. Validated at
                                                        # startup, so a wrong value fails loudly.
 risk_profile = "vending"                               # [V]
@@ -176,3 +189,11 @@ request_route = "telegram.operator:OPERATOR_CHAT_ID"   # [V] request_route forma
 
 [security]
 encrypt = true                                         # [?] confirm exact path (secrets.encrypt vs security.encrypt)
+
+# Default search_mode is "hybrid", which wants an embedding provider we do not
+# configure — doctor warns and silently falls back to keyword search anyway.
+# Ask for bm25 explicitly so the behaviour is chosen rather than degraded into.
+# The agent's memory is chat context only; the invoice ledger is SQLite and is
+# never searched through this.
+[memory]
+search_mode = "bm25"
