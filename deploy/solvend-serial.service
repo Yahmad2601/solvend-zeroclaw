@@ -21,9 +21,18 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/solvend
-PrivateNetwork=true          # it never touches the network — enforce that
+# systemd does NOT accept trailing comments on a directive line — it parses the
+# comment as part of the value, fails, and IGNORES the directive while the unit
+# still starts "successfully". Observed 2026-08-06: `PrivateNetwork=true  # ...`
+# was silently dropped, leaving the daemon with the network access this line
+# exists to remove. Keep every comment on its own line.
+# It never touches the network — enforce that.
+PrivateNetwork=true
 DevicePolicy=closed
-DeviceAllow=/dev/ttyUSB0 rw
+# char-ttyUSB, not /dev/ttyUSB0: systemd resolves a device path to one
+# major:minor at load time, so a reboot that renumbers the port would be blocked
+# even when SOLVEND_SERIAL_PORT uses a stable /dev/serial/by-id/ path.
+DeviceAllow=char-ttyUSB rw
 
 [Install]
 WantedBy=multi-user.target
