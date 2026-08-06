@@ -166,10 +166,31 @@ concurrent invoices contending for one payment.
 
 ### Refunds
 
-Agent calls `sop_execute` → [`sops/refund-request`](sops/refund-request/) →
-approval checkpoint on the operator's Telegram → on approval, a **Solana Pay
-URI** the operator scans with their own wallet. `on_no_approver = "deny"`;
-`max_pending_approvals = 8` bounds queue-flooding.
+**Refunds are not reachable from chat at all.** The customer-facing agent has no
+refund tool, so "get an attacker address into the refund path" has no entry point
+through conversation — there is no tool to call and no field to inject.
+
+This started as a concession and ended as the stronger design. ZeroClaw v0.8.4
+has no tool arguments, and a refund is meaningless without an invoice id (the
+invoice skill dodges this by making the item a *tool name*, which does not
+generalise to ids). `sop_execute` is also absent from this release's tool list,
+so the agent could not have driven the SOP regardless. Rather than register a
+tool that would fail in a customer's chat, refunds became an operator action:
+
+```
+solvend-run.sh refund-request INV-0412 "reason"   # payer resolved FROM CHAIN
+solvend-run.sh refund-approve INV-0412            # emits a Solana Pay URI
+```
+
+The operator scans that URI with **their own wallet** — we still hold no key, and
+the approval is a human with a wallet rather than a queue entry. The control that
+mattered is untouched: `cmd_refund_request()` takes no destination address, the
+payer is derived from the settling transaction, and an ambiguous transaction
+resolves to `None` and fails closed.
+
+[`sops/refund-request/`](sops/refund-request/) is retained as the operator's
+written procedure, and [`skills/refund/SKILL.toml`](skills/refund/SKILL.toml)
+records the tool surface for a release that supports arguments.
 
 Refunds are refused by SQL for invoices in `CLAIMED` (drink dispensed),
 `AWAITING_PAYMENT` (never paid), `REFUNDED`, and `REFUND_DENIED`.
@@ -211,9 +232,9 @@ twice.
 
 ### Threat model — what this does NOT cover
 
-- **A socially-engineered operator.** Nothing stops an operator who approves a
-  bad refund. The mitigation is that they see an on-chain-derived address, so
-  approving still pays the real payer.
+- **A socially-engineered operator.** Nothing stops an operator who chooses to
+  issue a bad refund. The mitigation is that the refund URI they are handed pays
+  an on-chain-derived address, so going through with it still pays the real payer.
 - **Root on the Pi.** `/etc/solvend/env` and the ledger are readable. Full-disk
   encryption and SSH keys only. The serial line is also a trust boundary:
   anything that can write `/dev/ttyUSB0` can dispense.
@@ -221,12 +242,21 @@ twice.
   paid customer gets no drink. It **cannot** manufacture a payment, because
   validation reads finalized balance deltas. Failure mode is a stuck invoice,
   not a stolen one, and the operator can settle by hand.
-- **The model provider sees customer messages.** Handles, item names, and — in
-  refund conversations — the on-chain payer address pass through the LLM. Run a
-  **paid** provider tier: free tiers commonly permit inputs to be used for model
-  improvement, and Gemini's free tier is in any case capped at 5 requests/minute,
-  which a tool-calling turn exhausts on its own. A local model also works. **No OTP, RPC key, or ledger data reaches the provider** — code
+- **The model provider sees customer messages.** Item names and whatever the
+  customer types pass through the LLM. Nothing else does — not payer addresses
+  (refunds have no model in them), and **no OTP, RPC key, or ledger data**. Code
   delivery and payment validation have no model in the path at all.
+  A production operator should run a **paid** tier or a local model: free tiers
+  commonly permit inputs to be used for model improvement. This build runs Groq's
+  free tier, chosen because Gemini's free tier could not serve even one customer
+  — it is capped at 20 requests/minute and returned 429 on the first attempt of a
+  single call. Card-based billing was not available to us to lift it.
+- **Two customers mid-turn on the same channel at the same instant** could race
+  on "most recent active session" when the machine resolves who is asking. The
+  customer never supplies their own identity — it is read from ZeroClaw's session
+  store, which is what makes impersonation-by-message impossible — but the
+  read is a heuristic under exact concurrency. Correct for a single-slot machine;
+  a fleet would need the tool interface to pass the caller, which v0.8.4 cannot.
 - **Shoulder-surfing at the keypad.** Same threat model as any vending machine.
 - **Two concurrent same-amount invoices, paid without a reference,** cannot be
   told apart from chain data. They are filled oldest-invoice-first. Correct for a
@@ -241,9 +271,9 @@ The minute poller is a **cron shell job, not an agentic run** (registered with
 
 OTP delivery goes out via `zeroclaw channel send` — a fixed template with a code
 from SQL. No model in that path, so none can hallucinate a digit, leak another
-thread's code, or be talked into issuing one. The agent is woken with
-`zeroclaw agent -a solvend -m` only for expiries and refunds, where judgment is
-genuinely required.
+thread's code, or be talked into issuing one. The model runs in exactly one
+place: talking to a customer and choosing which invoice tool to call. Refunds and
+expiries are operator CLI actions with no model in them either.
 
 «FILL: actual 30-day model spend»
 
@@ -271,8 +301,8 @@ dependency.
 | [`solvend/test_solvend.py`](solvend/test_solvend.py) | 50 tests, mocked RPC, no live network |
 | [`solvend/solvend-serial.py`](solvend/solvend-serial.py) | ESP32 keypad daemon |
 | [`solvend/bin/`](solvend/bin/) | Env wrappers + the zero-token poller |
-| [`skills/`](skills/) | `solana-pay-invoice`, `dispense-otp`, `refund` |
-| [`sops/`](sops/) | `payment-watcher` (cron), `refund-request` (checkpoint) |
+| [`skills/`](skills/) | `solana-pay-invoice`, `dispense-otp` (`refund` is operator-CLI, not registered) |
+| [`sops/`](sops/) | `payment-watcher` (cron), `refund-request` (operator procedure) |
 | [`firmware/solvend_esp32/`](firmware/solvend_esp32/) | ESP32 firmware, no Wi-Fi |
 | [`deploy/`](deploy/) | systemd units |
 | [`docs/injection-test.md`](docs/injection-test.md) | 11-attack protocol + results |
@@ -362,8 +392,10 @@ the model can read, never in code (bounty trap #5).
 ```bash
 zeroclaw skills install skills/solana-pay-invoice --bundle solvend
 zeroclaw skills install skills/dispense-otp       --bundle solvend
-zeroclaw skills install skills/refund             --bundle solvend
-zeroclaw skills list      # all three, under [bundle: solvend]
+# skills/refund is intentionally NOT installed — refunds are an operator CLI
+# action. See skills/refund/SKILL.toml for why.
+zeroclaw skills list      # want invoice_water / invoice_cola / invoice_energy
+                          # plus check_payments, under [bundle: solvend]
 
 cp -r sops/* <install>/agents/solvend/workspace/sops/
 zeroclaw sop validate && zeroclaw sop list
@@ -445,15 +477,17 @@ Rows 1–7 cannot succeed even if the model complies fully.
 
 ```
 «FILL: paste the full live transcript here — customer messages, agent replies,
-operator Telegram checkpoint, and the emitted refund URI showing the ORIGINAL
-payer address. Redact real handles and the RPC key.»
+and the operator-run refund showing the emitted URI with the ORIGINAL payer
+address. Redact real handles and the RPC key.»
 ```
 
 </details>
 
-**The clip worth watching:** an attacker asks to refund to their address, the
-operator sees the checkpoint, **approves it**, and the URI pays the original
-payer. The attack completes the entire workflow and still fails.
+**The clip worth watching:** an attacker asks the agent to refund to their
+address. The agent has no refund tool to call, so the request dies in chat. The
+operator then runs the refund by hand — `refund-approve` emits a URI paying the
+**original on-chain payer**, because the destination was never a field anyone
+could write to. The attack fails twice, for two independent reasons.
 
 ## Test output
 
@@ -490,9 +524,12 @@ Documented gotchas found while building:
 - The **`peripheral` SOP trigger validates but has no live event source** wired
   into the dispatcher. Serial events cannot trigger an SOP directly — hence the
   standalone daemon.
-- **There is no `zeroclaw sop execute` CLI.** `sop_execute` is an agent-only
-  tool, so a shell cron job cannot start an SOP. `zeroclaw agent -a X -m` and
-  `zeroclaw channel send` are the shell-reachable entry points.
+- **There is no `zeroclaw sop execute` CLI, and `sop_execute` is not in the tool
+  list either.** A shell cron job cannot start an SOP, and in v0.8.4 neither can
+  an agent — enumerating the agent's tools returns no `sop_execute`. SOPs are
+  therefore written procedure, not an executable path; this is why the refund
+  flow is operator-CLI. `zeroclaw agent -a X -m` and `zeroclaw channel send` are
+  the shell-reachable entry points.
 - **Cron SOPs are dispatched by the maintenance tick** (default 60s), "a poller
   rather than a per-schedule timer" — 60s is the real floor on payment
   detection, not a scheduling choice.

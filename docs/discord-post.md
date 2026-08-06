@@ -99,8 +99,9 @@ serialization. That's a direct payoff of staying at T1.
 The minute poller is a **cron shell job, not an agentic run**: 1,440 chain
 checks a day for **zero tokens**. OTP delivery goes out via `zeroclaw channel
 send` — a fixed template with a code from SQL, so no model can hallucinate a
-digit or be talked into issuing one. The LLM is woken only for refunds and
-expiries, where judgment is genuinely required.
+digit or be talked into issuing one. The LLM runs in exactly one place: talking
+to a customer and choosing which invoice tool to call. Refunds and expiries are
+operator CLI actions with no model in them either.
 
 «FILL: actual 30-day model spend»
 
@@ -131,15 +132,17 @@ per-agent memory · `http_request` locked to two hosts
 ## Built for this
 
 `solvend.py` (state machine + RPC validation, 50 tests) · serial daemon ·
-3 skills · 2 SOPs · ESP32 firmware refactor · systemd units · two verifying
+2 registered skills · 2 SOPs · ESP32 firmware refactor · systemd units · two verifying
 Pi deploy scripts. All MIT, all in the repo, config redacted.
 
 ## Prompt-injection transcript
 
 11 attacks, full protocol and results in the repo. The one worth watching in the
-video: an attacker asks to refund to *their* address, the operator sees the
-checkpoint, **approves it** — and the URI pays the original payer anyway. The
-attack completes the entire workflow and still fails.
+video: an attacker asks to refund to *their* address. The agent has no refund
+tool to call, so it dies in chat — and when the operator then runs the refund by
+hand, the URI pays the **original on-chain payer** anyway, because the
+destination was never a field anyone could write to. It fails twice, for two
+independent reasons.
 
 «FILL: paste the 3–4 strongest transcript excerpts here»
 
