@@ -1,10 +1,32 @@
-# Typed tool definition for the solana-pay-invoice skill.
+# Tool definitions for the solana-pay-invoice skill.
 #
-# [?] The [skill] table and its name/description/version/author/tags fields are
-# verified. The [[tools]] entry shape below is NOT — docs confirm only that
-# entries take kind = "shell" | "http" | "script". Verify field names against a
-# shipped example before relying on this, and check whether SKILL.md and
-# SKILL.toml may coexist in one skill directory or whether TOML wins outright.
+# ONE TOOL PER ITEM, and no arguments anywhere. This is not a stylistic choice —
+# it is what this ZeroClaw release supports. Verified 2026-08-06:
+#
+#   * `zeroclaw skills add` scaffolds SKILL.md ONLY. There is no SKILL.toml in the
+#     canonical layout, and no argument concept anywhere in it.
+#   * [[tools]] accepts exactly name / kind / description / command. Adding ANY
+#     other key — [[tools.args]], an inline `args = [...]`, or [tools.parameters]
+#     — makes ZeroClaw discard the whole entry: the skill installs, passes
+#     `skills audit`, and then simply never registers. All three were tested.
+#   * `command` DOES take arguments in the string (dispense-otp runs
+#     "python3 /opt/solvend/solvend.py watch"), which is what makes this work.
+#
+# The upside is real: with no `item` parameter, "charge me 0.01 for a cola" has
+# nothing to bind to at the tool boundary either, not just in solvend.ITEMS. The
+# item is now a *tool name* the model selects, and an unknown item cannot be
+# expressed at all.
+#
+# THE CALLER IS RESOLVED, NOT PASSED. Tool arguments do not exist, so the wrapper
+# cannot be told who is asking. Instead new_invoice.py reads ZeroClaw's own
+# session store (`session_metadata.channel_id` / `.room_id`) to find the customer
+# currently in conversation. This generalises to any customer — nothing is
+# hardcoded — and is stronger than a parameter would have been: the customer never
+# supplies the value, so no message can claim to be someone else.
+#
+# Residual limit, stated in the README: two customers mid-turn on the same channel
+# at the same instant could race on "most recent active session". Fine for a
+# single-slot machine; a fleet would want the tool interface to pass the caller.
 
 [skill]
 name = "solana-pay-invoice"
@@ -14,26 +36,19 @@ author = "solvend"
 tags = ["solana", "payments", "vending"]
 
 [[tools]]
-name = "new_invoice"
+name = "invoice_water"
 kind = "script"
-description = "Mint an invoice ID, a 32-byte base58 reference key, and a Solana Pay transfer-request URI. Returns JSON."
-command = "/opt/solvend/bin/solvend-run.sh-invoice"   # wrapper; sources /etc/solvend/env
+description = "Issue a Solana Pay invoice for a WATER (1.00 USDC). Returns JSON containing a `uri` to give the customer. Use when the customer asks for water."
+command = "/opt/solvend/bin/solvend-run.sh-invoice water"
 
-  [tools.args.item]
-  type = "string"
-  description = "Drink name: water, cola, or energy. Price is looked up server-side."
-  required = true
+[[tools]]
+name = "invoice_cola"
+kind = "script"
+description = "Issue a Solana Pay invoice for a COLA (1.50 USDC). Returns JSON containing a `uri` to give the customer. Use when the customer asks for cola."
+command = "/opt/solvend/bin/solvend-run.sh-invoice cola"
 
-  [tools.args.channel]
-  type = "string"
-  description = "Channel alias this customer is on, e.g. whatsapp.shop"
-  required = true
-
-  [tools.args.handle]
-  type = "string"
-  description = "The customer's handle on that channel."
-  required = true
-
-# There is deliberately no `amount` argument. The price lives in solvend.ITEMS,
-# so a message cannot set what a customer is charged — the same control shape
-# as the refund destination.
+[[tools]]
+name = "invoice_energy"
+kind = "script"
+description = "Issue a Solana Pay invoice for an ENERGY drink (2.50 USDC). Returns JSON containing a `uri` to give the customer. Use when the customer asks for an energy drink."
+command = "/opt/solvend/bin/solvend-run.sh-invoice energy"

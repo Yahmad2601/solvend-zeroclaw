@@ -15,6 +15,7 @@ Prints one line of JSON on stdout.
 
 import json
 import os
+import sqlite3
 import sys
 from urllib.parse import quote
 
@@ -35,15 +36,75 @@ def b58encode(raw: bytes) -> str:
     return "1" * (len(raw) - len(raw.lstrip(b"\x00"))) + out
 
 
+SESSIONS_DB = os.environ.get(
+    "ZEROCLAW_SESSIONS_DB",
+    os.path.expanduser("~/.zeroclaw/data/sessions/sessions.db"),
+)
+
+
+def resolve_caller():
+    """-> (channel_id, room_id) for the customer currently talking, or None.
+
+    ZeroClaw v0.8.4 script tools receive NOTHING — no argv, no stdin, and an
+    environment with no caller context (verified by dumping it from inside a
+    live tool call). `[[tools]]` also accepts no argument schema, so the agent
+    cannot be given a parameter to pass the handle in.
+
+    But ZeroClaw records the conversation itself. `session_metadata` carries
+    `channel_id` ('telegram.shop') and `room_id` (the chat id) per session, so
+    the tool looks the caller up instead of being told. Read-only, on a database
+    this process never writes.
+
+    This is *stronger* than a parameter would be: the customer never supplies
+    the value, so no message can claim to be somebody else — the same control
+    shape as the price and the refund destination.
+
+    Ordering prefers a session with a live turn (`turn_id IS NOT NULL`) and
+    falls back to most-recently-active. Two customers mid-turn on the same
+    channel at the same instant could still race; for a single-slot machine
+    serving one person at a time that is acceptable, and it is stated in the
+    README rather than hidden.
+    """
+    channel_filter = os.environ.get("SOLVEND_CUSTOMER_CHANNEL")
+    sql = ("SELECT channel_id, room_id FROM session_metadata"
+           " WHERE channel_id IS NOT NULL AND room_id IS NOT NULL")
+    params = []
+    if channel_filter:
+        sql += " AND channel_id = ?"
+        params.append(channel_filter)
+    sql += " ORDER BY (turn_id IS NOT NULL) DESC, last_activity DESC LIMIT 1"
+    try:
+        conn = sqlite3.connect(f"file:{SESSIONS_DB}?mode=ro", uri=True, timeout=5)
+        try:
+            row = conn.execute(sql, params).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    return (row[0], row[1]) if row else None
+
+
 def main() -> int:
-    if len(sys.argv) != 4:
-        print(json.dumps({"error": "usage: new_invoice.py <item> <channel> <handle>"}))
-        return 2
+    args = sys.argv[1:]
 
     # No amount parameter, by design. The price is looked up from solvend.ITEMS,
     # so no message — however it is phrased, whoever it claims to be from —
     # can set what a customer is charged.
-    item, channel, handle = sys.argv[1:4]
+    if len(args) == 3:
+        item, channel, handle = args          # explicit: CLI tests, operator use
+    elif len(args) == 1:
+        item = args[0]                        # agent path: resolve the caller
+        caller = resolve_caller()
+        if caller is None:
+            print(json.dumps({"error": "no active session found; cannot address "
+                                       "the customer. Retry, or pass "
+                                       "<item> <channel> <handle> explicitly."}))
+            return 2
+        channel, handle = caller
+    else:
+        print(json.dumps({"error": "usage: new_invoice.py <item> "
+                                   "[<channel> <handle>]"}))
+        return 2
 
     reference = b58encode(os.urandom(32))
     rec = solvend.cmd_invoice(item, channel, handle, reference)

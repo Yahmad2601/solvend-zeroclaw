@@ -108,8 +108,46 @@ max_response_size = 262144                             # [V] 256 KiB. Trap #3: a
 # RISK PROFILE — fail-closed
 # ---------------------------------------------------------------------------
 [risk_profiles.vending]                                # [V] risk_profiles.<alias>
-allowed_commands = []                                  # [V] no shell for the chat-facing agent
-excluded_tools = ["browser", "file_download"]          # [V] strips tools from every non-CLI channel
+# One entry, not empty. A script tool is still a command, and an empty allowlist
+# is what refused the poller earlier today. This permits exactly the invoice
+# wrapper - no shell, no interpreter, no `amount` parameter anywhere in it.
+allowed_commands = ["/opt/solvend/bin/solvend-run.sh-invoice"]
+
+# Every name below was read from the running agent, not guessed:
+#   zeroclaw agent -a solvend -m "List every tool available to you, by exact name."
+#
+# The previous value was ["browser", "file_download"] — and NEITHER NAME EXISTS.
+# The real tool is `browser_open`; there is no `file_download` at all. The list
+# matched nothing, so the chat-facing agent had `shell`, `file_write`, `cron_add`,
+# `http_request`, `spawn_subagent` and 40 more reachable from any customer
+# message. `allowed_commands = []` still blocked shell *execution*, but the tools
+# were offered to the model and most of them never touch the command allowlist.
+#
+# Symptom that exposed it: a "Tool approval required — sessions_list" prompt with
+# Approve/Deny buttons appeared in the CUSTOMER chat, which is precisely the
+# boundary this design exists to enforce.
+#
+# There is no allowlist key on risk profiles, and inventing one is dangerous —
+# an unrecognised key makes ZeroClaw discard the whole section and fall back to
+# defaults (i.e. no restrictions), silently. So this is an explicit denylist of
+# every built-in. Skill tools are namespaced `<skill>__<tool>` and are not
+# excluded; they are the only surface the customer agent should have.
+#
+# Re-run the enumeration command after any ZeroClaw upgrade — a new built-in
+# would arrive un-excluded.
+excluded_tools = [
+  "shell", "file_read", "file_write", "file_edit", "glob_search", "content_search",
+  "cron_add", "cron_list", "cron_remove", "cron_update", "cron_run", "cron_runs",
+  "memory_store", "memory_recall", "memory_forget", "memory_export", "memory_purge",
+  "schedule", "spawn_subagent", "send_message_to_peer",
+  "model_routing_config", "model_switch", "proxy_config",
+  "git_operations", "git_forge", "pushover", "calculator", "weather", "canvas",
+  "TodoWrite", "llm_task", "browser_open", "http_request", "web_fetch",
+  "web_search_tool", "backup", "screenshot", "image_info",
+  "sessions_current", "sessions_list", "sessions_history", "sessions_send",
+  "poll", "reaction", "channel_room", "ask_user", "send_via",
+  "escalate_to_human", "delegate",
+]
 forbidden_paths = ["~/.zeroclaw/config.toml", "/var/lib/zeroclaw"]   # [V]
 
 [risk_profiles.vending.approval_route]                 # [V]
@@ -117,13 +155,22 @@ approver_channel = "telegram.operator"                 # [V] approvals leave the
 timeout_secs = 300                                     # [V] default 120
 on_no_approver = "deny"                                # [V] fail closed — this is the line judges look for
 
-[runtime_profiles.vending]                             # [V] runtime_profiles.<alias>
-# 3, not 8. The agent's whole job is: parse the item, call new_invoice once,
-# paste the URI back. Three iterations covers that with room to spare. Lowered
-# 2026-08-06 because every unused iteration is still a billable model request —
-# on Gemini's free tier (5 requests/minute) a single "I need a cola" could burn
-# the entire per-minute budget in retries and 429 the customer mid-purchase.
-max_iterations = 3                                     # [?] caps a runaway tool loop
+[runtime_profiles.vending]                             # runtime_profiles.<alias>
+# REAL SCHEMA, read off a running v0.8.4 instance 2026-08-06. The previous value
+# here was `max_iterations = 8` — NOT A REAL KEY. ZeroClaw silently discarded the
+# whole section and substituted defaults, which shipped `agentic = false` and
+# `max_tool_iterations = 0`: the agent could not call tools at all. That is the
+# fourth time an unrecognised key has caused a section to be dropped without an
+# error (see also http_request.secrets, [cron.*], [tools.args]).
+agentic = true                                         # false => no tool loop at all
+max_tool_iterations = 3                                # the agent needs ~3: parse, call, reply
+max_actions_per_hour = 20
+max_cost_per_day_cents = 500                           # hard spend ceiling
+max_delegation_depth = 0                               # no subagents
+shell_timeout_secs = 60
+strict_tool_parsing = false
+tool_call_dedup_exempt = []
+tool_filter_groups = []                                # [?] possible allowlist mechanism — unexplored
 
 
 # ---------------------------------------------------------------------------
