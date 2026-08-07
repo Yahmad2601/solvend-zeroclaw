@@ -1,7 +1,7 @@
 # SolVend — a physical vending machine that takes USDC over Telegram
 
-**Video (2:5x):** «FILL: link»
-**Repo:** «FILL: github.com/you/solvend»
+**Video:** https://youtu.be/xvKPdjljn4o (recorded on **devnet**)
+**Repo:** https://github.com/Yahmad2601/solvend-zeroclaw
 **Custody: T1 — no keys held. Secrets on the box: one RPC key.**
 
 ---
@@ -19,8 +19,9 @@ or a merchant account. Setup is an evening. Hardware is a Pi and an ESP32.
 
 ## Architecture — Tier 1, deliberately
 
-**Pi** runs ZeroClaw: two Telegram bots, skills, SOP engine, approval
-checkpoints. **ESP32** does nothing but report keypresses and obey dispense
+**Pi** runs ZeroClaw: two Telegram bots, skills with script tools, risk and
+runtime profiles, and a cron shell job. **ESP32** does nothing but report
+keypresses and obey dispense
 commands over a 4-token serial protocol. It has no Wi-Fi stack, no TLS, no API
 key. Dump the flash and you get pin numbers.
 
@@ -60,9 +61,12 @@ any transaction. We fetch the transaction and check the merchant's USDC balance
 delta. Dust payments, wrong-recipient payments, wrong-mint payments and
 failed-but-signed transactions all fail to settle, with tests for each.
 
-Refunds: SOP approval checkpoint → operator's Telegram → on approval the agent
-emits a **Solana Pay URI** the operator scans with their own wallet.
-`on_no_approver = "deny"`. We never hold a key.
+Refunds are **not reachable from chat at all** — the customer-facing agent has no
+refund tool, so there is no entry point through conversation. An operator runs
+`refund-request` / `refund-approve` from the box, which emits a **Solana Pay URI**
+they scan with their own wallet. We never hold a key. (This started as a
+concession — v0.8.4 has no tool arguments and `sop_execute` isn't in the tool
+list — and ended as the stronger design.)
 
 **50 tests, mocked RPC, no live network.**
 
@@ -103,7 +107,10 @@ digit or be talked into issuing one. The LLM runs in exactly one place: talking
 to a customer and choosing which invoice tool to call. Refunds and expiries are
 operator CLI actions with no model in them either.
 
-«FILL: actual 30-day model spend»
+**One model call per purchase** — reading the customer's message and picking an
+invoice tool. Chain polling, settlement, OTP minting, delivery, the keypad claim
+and the dispense have no model in them. A machine that sells nothing overnight
+makes zero provider calls.
 
 ## Component boundaries we hit (and documented)
 
@@ -124,10 +131,12 @@ Building on a stock release surfaced things worth writing down:
 
 ## ZeroClaw features used
 
-Two Telegram channels · skills & skill bundles · SOP engine (cron + manual
-triggers) · approval checkpoints with groups/policies · risk profiles
-(`excluded_tools`, `approval_route`, `on_no_approver`) · cron shell jobs ·
-per-agent memory · `http_request` locked to two hosts
+Two Telegram channels (long-poll, no ingress) · skills & skill bundles · script
+tools · risk profiles (`excluded_tools` **49 → 3**, `allowed_commands`,
+`auto_approve`, `approval_route`, `on_no_approver`) · runtime profiles
+(`max_tool_iterations`, `max_actions_per_hour`, `max_cost_per_day_cents`) ·
+a second agent identity with no channels · `cron add` shell jobs (no `--prompt`)
+· `channel send` for model-free delivery · `http_request` locked to two hosts
 
 ## Built for this
 
@@ -144,8 +153,6 @@ hand, the URI pays the **original on-chain payer** anyway, because the
 destination was never a field anyone could write to. It fails twice, for two
 independent reasons.
 
-«FILL: paste the 3–4 strongest transcript excerpts here»
-
 ## Honest limits
 
 An operator who approves a bad refund is not stopped by this. Root on the Pi is
@@ -157,4 +164,4 @@ chain data — they're filled oldest-first, which is correct for a single-slot
 machine and stated here because it wouldn't be for a bank of them. PIX/BRL
 reconciliation is future work, not built.
 
-Reproduce it: «FILL: repo link»#setup — README has the full evening.
+Reproduce it: https://github.com/Yahmad2601/solvend-zeroclaw#setup — README has the full evening.

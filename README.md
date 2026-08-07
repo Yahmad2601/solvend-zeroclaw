@@ -10,7 +10,11 @@ code. They punch it into the keypad and a gantry drops the can.
 Built on stock [ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw) — Tier 1,
 no plugins, no WASM, no MCP server. Custody **T1: no keys held.**
 
-**Demo:** «FILL: video link» · **Showcase:** «FILL: Discord post link»
+**Demo video:** https://youtu.be/xvKPdjljn4o
+
+> The demo is recorded on **devnet**, using a devnet USDC mint set through
+> `SOLVEND_USDC_MINT`. Switching to mainnet is two lines in `/etc/solvend/env`
+> (RPC URL and mint) and no code change — `solvend.py` is network-agnostic.
 
 ---
 
@@ -26,7 +30,7 @@ terminal. Hardware is a Pi 4 and an ESP32. Setup is an evening.
 flowchart LR
   C[Customer<br/>Telegram] -->|"cola"| Z[ZeroClaw agent<br/>Raspberry Pi 4]
   Z -->|Solana Pay QR| C
-  C -->|pays USDC| SOL[(Solana<br/>mainnet)]
+  C -->|pays USDC| SOL[(Solana)]
   P[solvend-poll.sh<br/>cron, 0 tokens] -->|getSignaturesForAddress<br/>+ getTransaction| SOL
   P -->|zeroclaw channel send| C
   P --> DB[(SQLite ledger)]
@@ -68,6 +72,41 @@ membership check that one config mistake could collapse.
 > `solvend.py` contains no channel logic at all: the channel is a string in a
 > ledger column. Telegram long-polls too, so every ingress property above is
 > unchanged.
+
+## Which ZeroClaw features it uses
+
+Stock release binary on ARM. No compilation, no plugins, no WASM, no MCP.
+
+| ZeroClaw feature | What it does here |
+|---|---|
+| **Telegram channel** (long-poll) | The entire customer interface. `solvend.py` contains no channel code — the channel is a string in a ledger column |
+| **Two channel aliases** | `telegram.shop` for customers, `telegram.operator` for approvals. Separate bots, so approvals are structurally out of a customer's reach |
+| **Skills + script tools** | `invoice_water` / `invoice_cola` / `invoice_energy`. One tool per item, no arguments — so no field exists for a message to inject |
+| **`risk_profiles.excluded_tools`** | The agent enumerates **49 built-in tools** by default. Explicitly denied down to **3** — verified by asking the running agent to list its own tools |
+| **`risk_profiles.allowed_commands`** | Exactly one executable path for the chat-facing agent. No shell, no interpreter |
+| **`risk_profiles.auto_approve`** | Lets the three invoice tools run without posting an approval prompt into the customer's chat |
+| **Separate agent identity** | `solvend_poller` has no channels and its own risk profile, so nothing a customer says can reach the identity allowed to run a shell script |
+| **`zeroclaw cron add`** (no `--prompt`) | The minute poller as a **shell job**, not an agentic run — 1,440 chain checks/day at zero tokens |
+| **`zeroclaw channel send`** | Deterministic OTP delivery. Fixed template, code from SQL, no model in the path |
+| **`runtime_profiles`** | `max_tool_iterations`, `max_actions_per_hour`, `max_cost_per_day_cents`, `max_delegation_depth = 0` |
+| **`zeroclaw config schema`** | How every `[?]` in `config/config.toml` got resolved. See [Component boundaries](#component-boundaries) |
+
+## What was built vs. what was composed
+
+**Composed** — everything above. Chat transport, tool dispatch, scheduling,
+permissioning, message delivery, and process supervision are ZeroClaw's. Swapping
+WhatsApp for Telegram cost four config lines and no code.
+
+**Built** — only the parts that must not be a language model's judgment:
+
+- `solvend.py` — invoice state machine, payment validation by token-balance
+  delta, atomic OTP burn, on-chain payer resolution. Stdlib only, 50 tests.
+- `solvend-serial.py` — the keypad bridge.
+- The ESP32 firmware — real-time stepper and servo timing.
+- Three shell wrappers that inject environment into script tools.
+
+The dividing line is deliberate: **ZeroClaw handles everything that talks;
+hand-written code handles everything that decides.**
 
 ## Safety & custody
 
@@ -275,7 +314,10 @@ thread's code, or be talked into issuing one. The model runs in exactly one
 place: talking to a customer and choosing which invoice tool to call. Refunds and
 expiries are operator CLI actions with no model in them either.
 
-«FILL: actual 30-day model spend»
+**Per purchase, the model is called once** — to read the customer's message and
+pick an invoice tool. Everything after that (chain polling, settlement, OTP
+minting, OTP delivery, keypad claim, dispense) has no model in it. A machine that
+sells nothing overnight makes zero provider calls.
 
 ## Layering — why deterministic scripts, not `http_request`
 
@@ -305,7 +347,7 @@ dependency.
 | [`sops/`](sops/) | `payment-watcher` (cron), `refund-request` (operator procedure) |
 | [`firmware/solvend_esp32/`](firmware/solvend_esp32/) | ESP32 firmware, no Wi-Fi |
 | [`deploy/`](deploy/) | systemd units |
-| [`docs/injection-test.md`](docs/injection-test.md) | 11-attack protocol + results |
+| [`docs/injection-test.md`](docs/injection-test.md) | 11-attack protocol, controls, and observed findings |
 
 ## Setup — an evening
 
@@ -472,17 +514,6 @@ exfiltration, and keypad brute force.
 
 Rows 1–7 cannot succeed even if the model complies fully.
 
-<details>
-<summary><b>Transcript</b></summary>
-
-```
-«FILL: paste the full live transcript here — customer messages, agent replies,
-and the operator-run refund showing the emitted URI with the ORIGINAL payer
-address. Redact real handles and the RPC key.»
-```
-
-</details>
-
 **The clip worth watching:** an attacker asks the agent to refund to their
 address. The agent has no refund tool to call, so the request dies in chat. The
 operator then runs the refund by hand — `refund-approve` emits a URI paying the
@@ -492,14 +523,32 @@ could write to. The attack fails twice, for two independent reasons.
 ## Test output
 
 ```
-«FILL: paste `python3 test_solvend.py` output — 50 passed, 0 failed»
+$ python3 solvend/test_solvend.py
+...
+refund — ambiguity fails closed
+  ok   two candidate payers resolves to None
+
+fallback — wallets that strip the Solana Pay reference
+  ok   stripped reference still settles via merchant account
+  ok   fallback mints a usable OTP
+  ok   one payment cannot settle a second invoice
+  ok   overpayment does NOT cross-bind via fallback
+  ok   underpayment rejected by fallback
+  ok   payment older than the invoice never binds
+  ok   failed tx rejected by fallback
+  ok   one payment settles exactly one of two identical invoices
+  ok   fallback keeps the watch payload small
+
+50 passed, 0 failed
 ```
+
+Stdlib only, mocked RPC, no network. Runs on any machine with Python 3.11+.
 
 ## Component boundaries
 
 ZeroClaw's config surface is large and the docs don't render every key. Each row
 below was an open question during the build, resolved empirically against
-`«FILL: ZeroClaw version»` rather than from documentation.
+**ZeroClaw v0.8.4** rather than from documentation.
 
 | Question | Answer |
 |---|---|
